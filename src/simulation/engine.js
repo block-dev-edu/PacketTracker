@@ -25,6 +25,11 @@ export class NetworkSimulation {
       dhcp: clone(definition.defaults?.dhcp || { enabled: false }),
       nat: clone(definition.defaults?.nat || { enabled: false }),
       firewall: clone(definition.defaults?.firewall || { mode: 'none' }),
+      switching: clone(definition.defaults?.switching || null),
+      ngfw: clone(definition.defaults?.ngfw || null),
+      routerConfig: clone(definition.defaults?.routerConfig || null),
+      isp: clone(definition.defaults?.isp || null),
+      ispProvisioning: {},
       acl: [],
       leases: {}
     };
@@ -42,11 +47,26 @@ export class NetworkSimulation {
 
   configureInterface(deviceId, interfaceId, address, prefix) {
     const device = this.getDevice(deviceId);
+    if (device.interfaces[interfaceId]?.locked || device.interfaces[interfaceId]?.provisioned) throw new Error(`${interfaceId} uses ISP-provided settings and cannot be edited`);
     const port = device.definition.ports.find(item => item.id === interfaceId);
     const bridgeExists = device.definition.ports.some(item => item.bridge === interfaceId);
-    if (!port && !bridgeExists) throw new Error(`Unknown interface: ${deviceId}:${interfaceId}`);
+    const ngfwSubinterface = device.ngfw?.subinterfaces?.[interfaceId];
+    const routerSubinterface = device.routerConfig?.subinterfaces?.[interfaceId];
+    if (!port && !bridgeExists && !ngfwSubinterface && !routerSubinterface) throw new Error(`Unknown interface: ${deviceId}:${interfaceId}`);
     if (port && ['switched', 'wireless'].includes(port.kind)) throw new Error(`${port.label} is a switch port and cannot have an independent IP address`);
     device.interfaces[interfaceId] = { address, prefix };
+  }
+
+  configureNgfw(deviceId, config) {
+    const device = this.getDevice(deviceId);
+    if (device.type !== 'firewall-ngfw') throw new Error('Only the Next-Generation Firewall supports this configuration');
+    device.ngfw = clone(config);
+  }
+
+  configureRouter(deviceId, config) {
+    const device = this.getDevice(deviceId);
+    if (device.type !== 'router-advanced') throw new Error('Only the Advanced Router supports VLAN subinterfaces');
+    device.routerConfig = clone(config);
   }
 
   setGateway(deviceId, gateway) { this.getDevice(deviceId).gateway = gateway; }
@@ -70,10 +90,44 @@ export class NetworkSimulation {
     device.nat = { enabled: true, ...clone(config) };
   }
 
+  createVlan(deviceId, vlanId, name = `VLAN${vlanId}`) {
+    const device = this.getDevice(deviceId);
+    if (!device.definition.capabilities.includes('vlans')) throw new Error(`${device.definition.name} does not support VLANs`);
+    if (!Number.isInteger(vlanId) || vlanId < 1 || vlanId > 4094) throw new Error('VLAN ID must be between 1 and 4094');
+    device.switching.vlans[vlanId] = name;
+  }
+
+  configureSwitchPort(deviceId, portId, updates) {
+    const device = this.getDevice(deviceId);
+    if (!device.switching?.ports[portId]) throw new Error(`Unknown managed switch port: ${portId}`);
+    const next = { ...device.switching.ports[portId], ...clone(updates) };
+    if (!['access', 'trunk'].includes(next.mode)) throw new Error('Switch port mode must be access or trunk');
+    if (next.mode === 'access' && !device.switching.vlans[next.accessVlan]) throw new Error(`VLAN ${next.accessVlan} does not exist`);
+    if (next.mode === 'trunk') {
+      next.allowedVlans ||= [];
+      const missing = next.allowedVlans.find(id => !device.switching.vlans[id]);
+      if (missing) throw new Error(`VLAN ${missing} does not exist`);
+    }
+    device.switching.ports[portId] = next;
+  }
+
   connect(aDevice, aPort, bDevice, bPort) {
     this.assertPortAvailable(aDevice, aPort);
     this.assertPortAvailable(bDevice, bPort);
+    this.applyIspProvisioning(aDevice, aPort, bDevice, bPort);
     this.links.push({ a: { deviceId: aDevice, portId: aPort }, b: { deviceId: bDevice, portId: bPort } });
+  }
+
+  applyIspProvisioning(aDevice, aPort, bDevice, bPort) {
+    const pairs = [[this.getDevice(aDevice), aPort, this.getDevice(bDevice), bPort], [this.getDevice(bDevice), bPort, this.getDevice(aDevice), aPort]];
+    const match = pairs.find(([upstream, , edge, edgePort]) => upstream.isp && edge.type.startsWith('router-') && edge.definition.ports.some(port => port.id === edgePort && port.kind === 'routed'));
+    if (!match) return null;
+    const [upstream, upstreamPort, edge, edgePort] = match;
+    if ([...this.devices.values()].some(device => Object.values(device.ispProvisioning || {}).some(provisioning => provisioning.providerId === upstream.id))) throw new Error('The ISP /30 handoff has no additional client address available');
+    edge.interfaces[edgePort] = { address: upstream.isp.clientAddress, prefix: upstream.isp.prefix, provisioned: true };
+    edge.gateway = upstream.isp.gateway;
+    edge.ispProvisioning[edgePort] = { providerId: upstream.id, providerPort: upstreamPort, address: upstream.isp.clientAddress, prefix: upstream.isp.prefix, gateway: upstream.isp.gateway };
+    return clone(edge.ispProvisioning[edgePort]);
   }
 
   assertPortAvailable(deviceId, portId) {
@@ -86,6 +140,20 @@ export class NetworkSimulation {
     const parent = new Map();
     const find = key => { if (!parent.has(key)) parent.set(key, key); if (parent.get(key) !== key) parent.set(key, find(parent.get(key))); return parent.get(key); };
     const union = (a, b) => { const ar = find(a), br = find(b); if (ar !== br) parent.set(ar, br); };
+    const vlanUniverse = new Set();
+    for (const device of this.devices.values()) {
+      for (const id of Object.keys(device.switching?.vlans || {})) vlanUniverse.add(Number(id));
+      for (const sub of [...Object.values(device.ngfw?.subinterfaces || {}), ...Object.values(device.routerConfig?.subinterfaces || {})]) if (sub.vlanId != null && Number.isInteger(Number(sub.vlanId))) vlanUniverse.add(Number(sub.vlanId));
+    }
+    const trunkVlans = (device, portId) => {
+      const config = device.switching?.ports?.[portId] || device.ngfw?.ports?.[portId] || device.routerConfig?.ports?.[portId];
+      if (config?.mode !== 'trunk' || config.enabled === false) return null;
+      return config.allowedVlans?.length ? config.allowedVlans : [...vlanUniverse];
+    };
+    const accessVlan = (device, portId) => {
+      const config = device.switching?.ports?.[portId];
+      return config?.mode === 'access' && config.enabled !== false ? Number(config.accessVlan) : null;
+    };
     for (const device of this.devices.values()) {
       for (const port of device.definition.ports) find(portKey(device.id, port.id));
       const bridges = new Map();
@@ -93,8 +161,31 @@ export class NetworkSimulation {
         if (bridges.has(port.bridge)) union(portKey(device.id, port.id), bridges.get(port.bridge));
         else bridges.set(port.bridge, portKey(device.id, port.id));
       }
+      if (device.switching) {
+        for (const [portId, config] of Object.entries(device.switching.ports)) {
+          if (!config.enabled) continue;
+          if (config.mode === 'access') union(portKey(device.id, portId), `${device.id}:vlan:${config.accessVlan}`);
+          else if (config.mode === 'trunk') for (const vlan of trunkVlans(device, portId)) union(`${portKey(device.id, portId)}@${vlan}`, `${device.id}:vlan:${vlan}`);
+        }
+      }
+      if (device.ngfw) for (const sub of Object.values(device.ngfw.subinterfaces)) {
+        if (sub.enabled !== false && sub.vlanId != null && Number.isInteger(Number(sub.vlanId))) find(`${portKey(device.id, sub.parent)}@${sub.vlanId}`);
+      }
+      if (device.routerConfig) for (const sub of Object.values(device.routerConfig.subinterfaces)) if (sub.enabled !== false && sub.vlanId != null && Number.isInteger(Number(sub.vlanId))) find(`${portKey(device.id, sub.parent)}@${sub.vlanId}`);
     }
-    for (const link of this.links) union(portKey(link.a.deviceId, link.a.portId), portKey(link.b.deviceId, link.b.portId));
+    for (const link of this.links) {
+      const aDevice = this.getDevice(link.a.deviceId), bDevice = this.getDevice(link.b.deviceId);
+      const aTrunk = trunkVlans(aDevice, link.a.portId), bTrunk = trunkVlans(bDevice, link.b.portId);
+      if (aTrunk && bTrunk) {
+        for (const vlan of aTrunk.filter(id => bTrunk.includes(id))) union(`${portKey(link.a.deviceId, link.a.portId)}@${vlan}`, `${portKey(link.b.deviceId, link.b.portId)}@${vlan}`);
+      } else if (aTrunk) {
+        const vlan = accessVlan(bDevice, link.b.portId);
+        if (vlan && aTrunk.includes(vlan)) union(`${portKey(link.a.deviceId, link.a.portId)}@${vlan}`, portKey(link.b.deviceId, link.b.portId));
+      } else if (bTrunk) {
+        const vlan = accessVlan(aDevice, link.a.portId);
+        if (vlan && bTrunk.includes(vlan)) union(portKey(link.a.deviceId, link.a.portId), `${portKey(link.b.deviceId, link.b.portId)}@${vlan}`);
+      } else union(portKey(link.a.deviceId, link.a.portId), portKey(link.b.deviceId, link.b.portId));
+    }
     const domains = new Map();
     for (const key of parent.keys()) { const root = find(key); if (!domains.has(root)) domains.set(root, []); domains.get(root).push(key); }
     return [...domains.values()];
@@ -110,7 +201,9 @@ export class NetworkSimulation {
       for (const [interfaceId, config] of Object.entries(device.interfaces)) {
         const directPort = device.definition.ports.find(port => port.id === interfaceId);
         const bridgePorts = device.definition.ports.filter(port => port.bridge === interfaceId);
-        bindings.push({ device, interfaceId, config, ports: directPort ? [directPort] : bridgePorts });
+        const sub = device.ngfw?.subinterfaces?.[interfaceId] || device.routerConfig?.subinterfaces?.[interfaceId];
+        const subPort = sub ? { id: `${sub.parent}@${sub.vlanId}` } : null;
+        bindings.push({ device, interfaceId, config, ports: subPort ? [subPort] : directPort ? [directPort] : bridgePorts });
       }
     }
     return bindings;
@@ -150,6 +243,8 @@ export class NetworkSimulation {
         ? this.natSessions.find(session => session.routerId === destination.device.id && session.translatedIp === packet.destinationIp && session.destinationIp === packet.sourceIp && session.protocol === packet.protocol)
         : null;
       if (destination && this.bindingsShareDomain(currentBinding, destination) && !returnSession) return { delivered: true, packet, hops: [...hops, destination.device.id] };
+      const upstream = this.interfaceBindings().find(binding => binding.device.id !== currentBinding.device.id && (binding.device.definition.capabilities.includes('externalNetwork') || binding.device.definition.capabilities.includes('providerNetwork')) && this.bindingsShareDomain(currentBinding, binding));
+      if (upstream) return { delivered: true, packet, hops: [...hops, upstream.device.id], upstream: true };
 
       let gatewayIp;
       if (currentBinding.device.definition.ports.some(port => ['endpoint', 'endpoint-wireless'].includes(port.kind))) gatewayIp = currentBinding.device.gateway;
@@ -191,6 +286,10 @@ export class NetworkSimulation {
       .filter(([, config]) => config.address && isInSubnet(destinationIp, config.address, config.prefix))
       .sort((a, b) => b[1].prefix - a[1].prefix);
     if (candidates.length) return { interfaceId: candidates[0][0], gateway: null };
+    if (device.gateway) {
+      const defaultInterface = Object.entries(device.interfaces).find(([, config]) => config.address && isInSubnet(device.gateway, config.address, config.prefix));
+      if (defaultInterface) return { interfaceId: defaultInterface[0], gateway: device.gateway };
+    }
     return null;
   }
 
@@ -219,6 +318,10 @@ export class NetworkSimulation {
     for (const saved of snapshot.devices || []) {
       const device = this.addDevice(saved.id, saved.type);
       Object.assign(device, clone(saved), { definition: device.definition });
+      if (device.definition.defaults?.isp) {
+        device.interfaces = { ...clone(device.definition.defaults.interfaces), ...(device.interfaces || {}) };
+        device.isp = { ...clone(device.definition.defaults.isp), ...(device.isp || {}) };
+      }
     }
     this.links = clone(snapshot.links || []);
   }
