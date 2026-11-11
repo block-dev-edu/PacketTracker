@@ -2,19 +2,22 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   AppWindow, Box, Cable, ChevronDown, ChevronRight, CircleHelp, Cloud, Cpu,
-  Database, Download, Ellipsis, EthernetPort, FilePlus2, Gauge, Grid3X3,
+  Copy, Database, Download, Ellipsis, EthernetPort, FilePlus2, Gauge, Grid3X3,
   FolderOpen, Globe2, HardDrive, Headphones, HousePlug, Laptop, LockKeyhole, Mail, Menu, Minus, Monitor,
   Moon, MousePointer2, Network, PanelLeftClose, PanelLeftOpen, Phone, Plus, Printer,
   Pencil, RadioTower, Redo2, RotateCcw, Router, Save, Search, Server, ShieldCheck,
-  Smartphone, Sparkles, SquareDashedMousePointer, Sun, Trash2, TriangleAlert, Undo2, Upload,
-  Video, Wifi, X, ZoomIn, ZoomOut
+  Smartphone, Sparkles, SquareDashedMousePointer, Sun, Trash2, TriangleAlert, Undo2,
+  GraduationCap, LogOut, Send, Share2, Users, Video, Wifi, X, ZoomIn, ZoomOut
 } from 'lucide-react';
 import './styles.css';
 import { getDeviceDefinition } from './simulation/definitions.js';
 import { createSwitchCliSession, executeSwitchCommand, switchPrompt } from './simulation/managedSwitchCli.js';
 import { createNgfwCliSession, executeNgfwCommand, ngfwPrompt } from './simulation/ngfwCli.js';
 import { createRouterCliSession, executeRouterCommand, routerPrompt } from './simulation/routerCli.js';
+import { createFirewallCliSession, executeFirewallCommand, firewallPrompt } from './simulation/firewallPolicyCli.js';
 import { findDuplicateIpConflicts, validateConnections } from './simulation/connectionValidation.js';
+import { devicePrimaryAddress, runPing } from './simulation/ping.js';
+import { evaluateAssignment } from './assignments/evaluate.js';
 
 const categories = [
   { id: 'routers', label: 'Routers', icon: Router },
@@ -58,6 +61,13 @@ const capabilities = {
   cli: 'Command-line configuration'
 };
 
+const isWirelessPort = port => ['wireless', 'endpoint-wireless'].includes(port?.kind);
+const isSharedWirelessRadio = port => port?.kind === 'wireless';
+const CANVAS_WIDTH = 6400;
+const CANVAS_HEIGHT = 4400;
+const CANVAS_ORIGIN_X = 1800;
+const CANVAS_ORIGIN_Y = 1200;
+
 const serverRoles = [
   { id: 'generic', name: 'Generic Server', icon: Server, purpose: 'A configurable host for custom network services.', capabilities: ['ip'] },
   { id: 'dns', name: 'DNS Server', icon: Network, purpose: 'Resolves names by serving DNS zones and records.', capabilities: ['ip', 'dnsService'] },
@@ -75,12 +85,12 @@ const devices = [
   { id: 'switch-managed', name: 'Managed Switch', category: 'switches', icon: EthernetPort, color: '#16a3a6', ports: '8 Ethernet ports', purpose: 'A command-line configurable switch with VLAN support.', capabilities: ['switching', 'vlans', 'cli'] },
   { id: 'hub', name: 'Repeater Hub', category: 'hubs', icon: Network, color: '#d68a28', model: 'Hub-PT' },
   { id: 'repeater', name: 'Repeater', category: 'hubs', icon: RadioTower, color: '#d68a28', model: 'Repeater-PT' },
-  { id: 'ap', name: 'Access Point', category: 'wireless', icon: Wifi, color: '#7c62c8', model: 'AccessPoint-PT' },
+  { id: 'ap', name: 'Access Point', category: 'wireless', icon: Wifi, color: '#7c62c8', ports: '1 Ethernet uplink · Wi-Fi', purpose: 'Bridges wireless clients onto a wired local network.', capabilities: ['switching', 'wifi'] },
   { id: 'wireless-router', name: 'Wireless Gateway', category: 'wireless', icon: RadioTower, color: '#7c62c8', ports: '4 LAN · 1 WAN · Wi-Fi', purpose: 'Connects wireless devices to a small wired network.', capabilities: ['switching', 'wifi', 'dhcp', 'nat'] },
   { id: 'cell-tower', name: 'Cell Tower', category: 'wireless', icon: RadioTower, color: '#7c62c8', model: 'Cell Tower' },
-  { id: 'firewall-stateless', name: 'Stateless Firewall', category: 'security', icon: ShieldCheck, color: '#df5a60', ports: '2 routed interfaces', purpose: 'Checks each packet against ordered IP, port, and protocol rules.', capabilities: ['ip', 'routing', 'statelessFirewall', 'acl'] },
-  { id: 'firewall-stateful', name: 'Stateful Firewall', category: 'security', icon: ShieldCheck, color: '#df5a60', ports: '2 routed interfaces', purpose: 'Tracks connections so legitimate return traffic can pass.', capabilities: ['ip', 'routing', 'statelessFirewall', 'statefulFirewall', 'acl'] },
-  { id: 'firewall-ngfw', name: 'Next-Generation Firewall', category: 'security', icon: ShieldCheck, color: '#df5a60', ports: '4 routed interfaces', purpose: 'Identifies applications and inspects traffic for threats.', capabilities: ['ip', 'routing', 'statefulFirewall', 'appAwareness', 'ips', 'deepInspection'] },
+  { id: 'firewall-stateless', name: 'Stateless Firewall', category: 'security', icon: ShieldCheck, color: '#df5a60', ports: '2 routed interfaces', purpose: 'Checks each packet against ordered IP, port, and protocol rules.', capabilities: ['ip', 'routing', 'statelessFirewall', 'acl', 'cli'] },
+  { id: 'firewall-stateful', name: 'Stateful Firewall', category: 'security', icon: ShieldCheck, color: '#df5a60', ports: '2 routed interfaces', purpose: 'Tracks connections so legitimate return traffic can pass.', capabilities: ['ip', 'routing', 'statelessFirewall', 'statefulFirewall', 'acl', 'cli'] },
+  { id: 'firewall-ngfw', name: 'Next-Generation Firewall', category: 'security', icon: ShieldCheck, color: '#df5a60', ports: '4 routed interfaces', purpose: 'Identifies applications and inspects traffic for threats.', capabilities: ['ip', 'routing', 'acl', 'statefulFirewall', 'appAwareness', 'ips', 'deepInspection', 'cli'] },
   { id: 'vpn', name: 'VPN Concentrator', category: 'security', icon: LockKeyhole, color: '#df5a60', model: 'VPN-PT' },
   { id: 'internet', name: 'Internet', category: 'wan', icon: Cloud, color: '#4b98d1', ports: '4 network connections', purpose: 'A preconfigured upstream gateway that provisions a connected edge router.', capabilities: ['externalNetwork', 'ispProvisioning'] },
   { id: 'isp-network', name: 'ISP Network', category: 'wan', icon: Network, color: '#4b98d1', ports: '4 provider connections', purpose: 'A preconfigured service-provider handoff for an edge router.', capabilities: ['providerNetwork', 'ispProvisioning'] },
@@ -92,7 +102,7 @@ const devices = [
   { id: 'laptop', name: 'Laptop', category: 'end', icon: Laptop, color: '#647182', model: 'Laptop-PT' },
   { id: 'server', name: 'Server', category: 'end', icon: Server, color: '#647182', ports: '1 Ethernet interface', purpose: 'Choose a server role before placing it.', capabilities: ['ip'] },
   { id: 'printer', name: 'Printer', category: 'end', icon: Printer, color: '#647182', model: 'Printer-PT' },
-  { id: 'ip-phone', name: 'IP Phone', category: 'end', icon: Phone, color: '#647182', model: 'IP Phone 7960' },
+  { id: 'ip-phone', name: 'IP Phone', category: 'end', icon: Phone, color: '#647182', ports: '1 Ethernet interface', purpose: 'A network telephone that can participate in IP reachability assignments.', capabilities: ['ip'] },
   { id: 'tablet', name: 'Tablet', category: 'end', icon: Smartphone, color: '#647182', model: 'Tablet PC' },
   { id: 'tv', name: 'Television', category: 'end', icon: Video, color: '#647182', model: 'TV-PT' },
   { id: 'headset', name: 'Headset', category: 'end', icon: Headphones, color: '#647182', model: 'Headset-PT' },
@@ -117,7 +127,82 @@ const legacyDeviceMigrations = {
 
 const featureLabels = featureIds => (featureIds || []).map(id => capabilities[id] || id);
 
+function configuredServerForRole(role) {
+  return {
+    ...devices.find(device => device.id === 'server'),
+    name: role.name,
+    label: role.name,
+    icon: role.icon,
+    purpose: role.purpose,
+    capabilities: role.capabilities,
+    serverRole: role.id,
+    services: role.capabilities.filter(capability => capability.endsWith('Service'))
+  };
+}
+
 const uid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+const displayScale = () => Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--display-scale')) || 1;
+function assignmentDescription(value, sentenceLimit = 3) {
+  const description = String(value || '').trim();
+  if (!description) return 'Network design assignment';
+  const sentences = description.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [description];
+  const limited = sentences.slice(0, sentenceLimit).join(' ').replace(/\s+/g, ' ').trim();
+  return `${limited}${sentences.length > sentenceLimit ? '…' : ''}`;
+}
+
+function assignmentPointBreakdown(spec, evaluation) {
+  const requiredByRole = new Map((spec?.roles || []).map(role => [role.id, role.count]));
+  const devices = {
+    total: (spec?.roles || []).reduce((sum, role) => sum + role.count, 0),
+    passed: (evaluation?.roleStatus || []).reduce((sum, role) => sum + Math.min(role.required, role.compatible), 0)
+  };
+  const relationshipPoints = action => (evaluation?.requirements || []).filter(item => item.type === 'relationship' && item.action === action).reduce((result, item) => {
+    const expected = (requiredByRole.get(item.from) || 0) * (requiredByRole.get(item.to) || 0);
+    result.total += Math.max(expected, item.checks?.length || 0);
+    result.passed += item.checks?.filter(check => check.status === 'passed').length || 0;
+    return result;
+  }, { passed: 0, total: 0 });
+  const segmentation = (evaluation?.requirements || []).filter(item => item.type === 'constraint').reduce((result, item) => {
+    let expected = 0;
+    for (let left = 0; left < item.roles.length; left++) for (let right = left + 1; right < item.roles.length; right++) expected += (requiredByRole.get(item.roles[left]) || 0) * (requiredByRole.get(item.roles[right]) || 0);
+    result.total += Math.max(expected, item.checks?.length || 0);
+    result.passed += item.checks?.filter(check => check.status === 'passed').length || 0;
+    return result;
+  }, { passed: 0, total: 0 });
+  const connect = relationshipPoints('allow'), block = relationshipPoints('deny');
+  return { devices, connect, block, segmentation, all: { passed: devices.passed + connect.passed + block.passed + segmentation.passed, total: devices.total + connect.total + block.total + segmentation.total } };
+}
+
+const ASSIGNMENT_AI_PROMPT = `You are helping a teacher create a PacketTracker network architecture assignment. Interview the teacher one question at a time, then return one JSON object and no markdown around it.
+
+Begin by asking:
+1. What is the general description of this situation?
+2. How many different endpoint roles are there, what are they called, and how many devices are required in each role?
+3. Which roles must communicate with which other roles? Ask separately about each direction.
+4. Which roles must be blocked from initiating communication with other roles?
+5. Must any roles be separated into different Layer 2 broadcast domains or VLANs?
+6. Are there any other architecture requirements relevant to IP or MAC/Layer 2 reachability?
+
+Ask follow-up questions whenever an answer is ambiguous. Explain these PacketTracker limits before accepting requirements:
+- Supported assessed endpoint device types are only "pc", "laptop", "server", and "ip-phone".
+- A role represents endpoint devices, not routers, switches, firewalls, VLANs, departments without devices, or Internet services.
+- Supported checks are Layer 2 domain reachability and Layer 3 ICMP reachability.
+- Layer 3 protocol must be "icmp". HTTP, HTTPS, DNS, email, files, applications, ports, dynamic routing, VPN behavior, IPS, and content inspection cannot currently be graded.
+- A directional allow or deny rule must be explicit. A→B does not imply B→A.
+- The only supported constraint is "separate_l2_domains".
+- Do not invent device types, services, constraint types, or fields outside this contract.
+
+Required JSON shape:
+{
+  "schemaVersion": "0.1",
+  "scenario": { "id": "lowercase-stable-id", "title": "Title", "description": "Student-facing instructions", "objectives": ["Optional objective"] },
+  "roles": [ { "id": "role-id", "name": "Display name", "deviceTypes": ["pc"], "count": 1 } ],
+  "relationships": [ { "id": "unique-check-id", "from": "source-role-id", "to": "destination-role-id", "action": "allow", "layer": "l3", "protocol": "icmp" } ],
+  "constraints": [ { "id": "unique-constraint-id", "type": "separate_l2_domains", "roles": ["role-a", "role-b"] } ],
+  "settings": { "allowExtraDevices": true, "showLiveProgress": true, "showFailureReasons": true }
+}
+
+For Layer 2 relationships use "layer": "l2" and omit protocol. Counts must be integers of at least 1. All referenced role IDs must exist. Do not add services or internet sections. Before producing JSON, summarize the proposed roles and directional checks and ask the teacher to confirm. Then output valid JSON only.`;
 
 function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
   const dx = x2 - x1, dy = y2 - y1;
@@ -135,9 +220,9 @@ function parallelConnectionLine(a, b, index, count) {
   return { x1: x1 + offsetX, y1: y1 + offsetY, x2: x2 + offsetX, y2: y2 + offsetY, midX: (x1 + x2) / 2 + offsetX, midY: (y1 + y2) / 2 + offsetY };
 }
 
-function loadSavedDesign() {
+function loadSavedDesign(source) {
   try {
-    const saved = JSON.parse(localStorage.getItem('packettracker-design') || '[]');
+    const saved = source || JSON.parse(localStorage.getItem('packettracker-design') || '[]');
     if (!Array.isArray(saved)) return [];
 
     return saved.map(item => {
@@ -156,6 +241,7 @@ function loadSavedDesign() {
         y: item.y,
         label: item.customName || (restoredDevice ? restoredDevice.name : item.label),
         interfaces: { ...(definition?.defaults?.interfaces || {}), ...(item.interfaces || {}) },
+        firewall: item.firewall || structuredClone(definition?.defaults?.firewall || { mode: 'none', policies: [] }),
         switching: item.switching || structuredClone(definition?.defaults?.switching || null),
         ngfw: item.ngfw || structuredClone(definition?.defaults?.ngfw || null),
         routerConfig: item.routerConfig || structuredClone(definition?.defaults?.routerConfig || null),
@@ -173,13 +259,36 @@ function serializeDesign(items) {
   return items.map(({ icon, ...item }) => item);
 }
 
-function App() {
-  const [activeCategory, setActiveCategory] = useState('routers');
+function projectDraftKey(projectId) {
+  return `packettracker-project-draft-${projectId}`;
+}
+
+function loadProjectDraft(projectId) {
+  if (!projectId) return null;
+  try {
+    const draft = JSON.parse(localStorage.getItem(projectDraftKey(projectId)) || 'null');
+    return draft && Array.isArray(draft.devices) ? draft : null;
+  } catch { return null; }
+}
+
+function editorViewKey(projectId) {
+  return `packettracker-editor-view-${projectId || 'local'}`;
+}
+
+function loadEditorView(projectId) {
+  try { return JSON.parse(localStorage.getItem(editorViewKey(projectId)) || 'null') || {}; }
+  catch { return {}; }
+}
+
+function EditorApp({ project, user, onSave, onBack, readOnly = false }) {
+  const draft = useRef(readOnly ? null : loadProjectDraft(project?.id)).current;
+  const savedEditorView = useRef(loadEditorView(project?.id)).current;
+  const [activeCategory, setActiveCategory] = useState(savedEditorView.activeCategory || 'routers');
   const [query, setQuery] = useState('');
-  const [placed, setPlaced] = useState(loadSavedDesign);
+  const [placed, setPlaced] = useState(() => loadSavedDesign(draft?.devices ?? project?.document?.devices));
   const [selected, setSelected] = useState(null);
-  const [zoom, setZoom] = useState(100);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [zoom, setZoom] = useState(() => Math.max(50, Math.min(150, Number(savedEditorView.zoom) || 100)));
+  const [sidebarOpen, setSidebarOpen] = useState(savedEditorView.sidebarOpen !== false);
   const [inspectorWidth, setInspectorWidth] = useState(() => Math.max(260, Math.min(640, Number(localStorage.getItem('packettracker-inspector-width')) || 292)));
   const [toast, setToast] = useState('');
   const [profileOpen, setProfileOpen] = useState(false);
@@ -197,23 +306,35 @@ function App() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [selectedArtifact, setSelectedArtifact] = useState(null);
   const [selectedConnection, setSelectedConnection] = useState(null);
-  const [inspectorPanel, setInspectorPanel] = useState('details');
+  const [inspectorPanel, setInspectorPanel] = useState(savedEditorView.inspectorPanel || 'details');
   const [contextMenu, setContextMenu] = useState(null);
+  const [pingDialog, setPingDialog] = useState(null);
+  const [cliDeviceId, setCliDeviceId] = useState(null);
   const [cancelToken, setCancelToken] = useState(0);
   const [isPanning, setIsPanning] = useState(false);
+  const [assignmentPanelOpen, setAssignmentPanelOpen] = useState(false);
+  const [assignmentPanelCategory, setAssignmentPanelCategory] = useState('overview');
   const [connections, setConnections] = useState(() => {
+    if (draft?.connections) return structuredClone(draft.connections);
+    if (project?.document?.connections) return structuredClone(project.document.connections);
     try { const saved = JSON.parse(localStorage.getItem('packettracker-connections') || '[]'); return Array.isArray(saved) ? saved : []; }
     catch { return []; }
   });
   const [notes, setNotes] = useState(() => {
+    if (draft?.notes) return structuredClone(draft.notes);
+    if (project?.document?.notes) return structuredClone(project.document.notes);
     try { const saved = JSON.parse(localStorage.getItem('packettracker-notes') || '[]'); return Array.isArray(saved) ? saved : []; }
     catch { return []; }
   });
   const [segments, setSegments] = useState(() => {
+    if (draft?.segments) return structuredClone(draft.segments);
+    if (project?.document?.segments) return structuredClone(project.document.segments);
     try { const saved = JSON.parse(localStorage.getItem('packettracker-segments') || '[]'); return Array.isArray(saved) ? saved : []; }
     catch { return []; }
   });
   const canvasRef = useRef(null);
+  const canvasInitializedRef = useRef(false);
+  const viewSaveFrameRef = useRef(null);
   const panRef = useRef(null);
   const clipboardRef = useRef(null);
   const historyRef = useRef({ past: [], future: [], current: null });
@@ -225,11 +346,27 @@ function App() {
   const connectMode = activeTool === 'connect';
   const connectionActive = connectMode || Boolean(pendingPort) || Boolean(portPicker);
 
+  useEffect(() => {
+    if (canvasInitializedRef.current || !canvasRef.current) return;
+    canvasInitializedRef.current = true;
+    const canvas = canvasRef.current;
+    const scale = zoom / 100;
+    canvas.scrollLeft = Number.isFinite(savedEditorView.scrollLeft) ? savedEditorView.scrollLeft : Math.max(0, CANVAS_ORIGIN_X * scale - 100);
+    canvas.scrollTop = Number.isFinite(savedEditorView.scrollTop) ? savedEditorView.scrollTop : Math.max(0, CANVAS_ORIGIN_Y * scale - 80);
+  }, [zoom]);
+
   const filtered = useMemo(() => devices.filter(device =>
     (query ? `${device.name} ${device.model || ''} ${device.purpose || ''} ${featureLabels(device.capabilities).join(' ')}`.toLowerCase().includes(query.toLowerCase()) : device.category === activeCategory)
   ), [query, activeCategory]);
   const connectionValidations = useMemo(() => validateConnections(placed, connections), [placed, connections]);
   const duplicateIpConflicts = useMemo(() => findDuplicateIpConflicts(placed, connections), [placed, connections]);
+  const assignmentSpec = project?.assignment?.specification || null;
+  const assignmentEvaluation = useMemo(() => assignmentSpec ? evaluateAssignment(assignmentSpec, placed, connections) : null, [assignmentSpec, placed, connections]);
+  const assignmentPoints = assignmentEvaluation ? assignmentPointBreakdown(assignmentSpec, assignmentEvaluation) : null;
+  const assignmentTotal = assignmentPoints?.all.total || 0;
+  const assignmentPassed = assignmentPoints?.all.passed || 0;
+  const assignmentProgress = assignmentTotal > 0 && assignmentPassed === assignmentTotal ? 'complete' : assignmentPassed > 0 ? 'partial' : 'empty';
+  const assignmentPercent = assignmentTotal ? Math.round((assignmentPassed / assignmentTotal) * 100) : 0;
   const duplicateAlerts = useMemo(() => {
     const byAddress = new Map();
     for (const [deviceId, conflicts] of duplicateIpConflicts) {
@@ -242,10 +379,30 @@ function App() {
     return [...byAddress].map(([address, names]) => ({ address, names: [...names] }));
   }, [duplicateIpConflicts, placed]);
 
+  function persistEditorScroll(event) {
+    const { scrollLeft, scrollTop } = event.currentTarget;
+    if (viewSaveFrameRef.current) cancelAnimationFrame(viewSaveFrameRef.current);
+    viewSaveFrameRef.current = requestAnimationFrame(() => {
+      const previous = loadEditorView(project?.id);
+      localStorage.setItem(editorViewKey(project?.id), JSON.stringify({ ...previous, scrollLeft, scrollTop, zoom, sidebarOpen, activeCategory, inspectorPanel }));
+      viewSaveFrameRef.current = null;
+    });
+  }
+
   useEffect(() => localStorage.setItem('packettracker-design', JSON.stringify(serializeDesign(placed))), [placed]);
   useEffect(() => localStorage.setItem('packettracker-connections', JSON.stringify(connections)), [connections]);
   useEffect(() => localStorage.setItem('packettracker-notes', JSON.stringify(notes)), [notes]);
   useEffect(() => localStorage.setItem('packettracker-segments', JSON.stringify(segments)), [segments]);
+  useEffect(() => {
+    const previous = loadEditorView(project?.id);
+    const canvas = canvasRef.current;
+    localStorage.setItem(editorViewKey(project?.id), JSON.stringify({ ...previous, zoom, sidebarOpen, activeCategory, inspectorPanel, ...(canvas ? { scrollLeft: canvas.scrollLeft, scrollTop: canvas.scrollTop } : {}) }));
+  }, [project?.id, zoom, sidebarOpen, activeCategory, inspectorPanel]);
+  useEffect(() => () => { if (viewSaveFrameRef.current) cancelAnimationFrame(viewSaveFrameRef.current); }, []);
+  useEffect(() => {
+    if (readOnly || !project?.id) return;
+    localStorage.setItem(projectDraftKey(project.id), JSON.stringify({ version: 2, updatedAt: Date.now(), devices: serializeDesign(placed), connections, notes, segments }));
+  }, [placed, connections, notes, segments, project?.id, readOnly]);
   useEffect(() => localStorage.setItem('packettracker-inspector-width', String(inspectorWidth)), [inspectorWidth]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -264,9 +421,20 @@ function App() {
   useEffect(() => {
     if (!contextMenu) return;
     const close = () => setContextMenu(null);
-    window.addEventListener('pointerdown', close);
+    const closeOutside = event => {
+      if (!event.target.closest?.('.device-context-menu')) setContextMenu(null);
+    };
+    const closeOnEscape = event => {
+      if (event.key === 'Escape') setContextMenu(null);
+    };
+    document.addEventListener('pointerdown', closeOutside, true);
+    document.addEventListener('keydown', closeOnEscape);
     window.addEventListener('blur', close);
-    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('blur', close); };
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside, true);
+      document.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('blur', close);
+    };
   }, [contextMenu]);
   useEffect(() => {
     const data = createDesignSnapshot();
@@ -300,6 +468,8 @@ function App() {
       const target = event.target;
       if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return;
       const key = event.key.toLowerCase();
+      const highlightedText = window.getSelection()?.toString();
+      if ((event.ctrlKey || event.metaKey) && key === 'c' && highlightedText) return;
       if ((event.ctrlKey || event.metaKey) && key === 'c') { event.preventDefault(); copySelection(false); }
       else if ((event.ctrlKey || event.metaKey) && key === 'x') { event.preventDefault(); copySelection(true); }
       else if ((event.ctrlKey || event.metaKey) && key === 'v') { event.preventDefault(); pasteSelection(); }
@@ -333,6 +503,7 @@ function App() {
     setProfileOpen(false);
     setServerPickerOpen(false);
     setServerPickerTarget(null);
+    setPingDialog(null);
     setToast('Interaction cancelled');
   }
 
@@ -482,9 +653,11 @@ function App() {
   }
 
   function addDevice(device, point) {
-    const canvas = canvasRef.current?.getBoundingClientRect();
-    const x = point ? (point.clientX - canvas.left) / (zoom / 100) : 160 + (placed.length % 5) * 115;
-    const y = point ? (point.clientY - canvas.top) / (zoom / 100) : 130 + Math.floor(placed.length / 5) * 105;
+    const canvas = canvasRef.current;
+    const bounds = canvas?.getBoundingClientRect();
+    const uiScale = displayScale();
+    const x = point ? ((point.clientX - bounds.left) / uiScale + canvas.scrollLeft) / (zoom / 100) - CANVAS_ORIGIN_X : 160 + (placed.length % 5) * 115;
+    const y = point ? ((point.clientY - bounds.top) / uiScale + canvas.scrollTop) / (zoom / 100) - CANVAS_ORIGIN_Y : 130 + Math.floor(placed.length / 5) * 105;
     const definition = getDeviceDefinition(device.id);
     const item = {
       ...device,
@@ -493,6 +666,8 @@ function App() {
       y: Math.max(30, y - 23),
       label: device.name,
       interfaces: structuredClone(definition?.defaults?.interfaces || {}),
+      gateway: null,
+      firewall: structuredClone(definition?.defaults?.firewall || { mode: 'none', policies: [] }),
       switching: structuredClone(definition?.defaults?.switching || null),
       ngfw: structuredClone(definition?.defaults?.ngfw || null),
       routerConfig: structuredClone(definition?.defaults?.routerConfig || null)
@@ -513,27 +688,13 @@ function App() {
   }
 
   function handleDeviceDragStart(event, device) {
-    if (device.id === 'server') {
-      event.preventDefault();
-      setServerPickerTarget(null);
-      setServerPickerOpen(true);
-      return;
-    }
     event.dataTransfer.setData('deviceId', device.id);
+    if (device.serverRole) event.dataTransfer.setData('serverRole', device.serverRole);
   }
 
   function placeConfiguredServer() {
     const role = serverRoles.find(item => item.id === serverRoleDraft) || serverRoles[0];
-    const configured = {
-      ...devices.find(device => device.id === 'server'),
-      name: role.name,
-      label: role.name,
-      icon: role.icon,
-      purpose: role.purpose,
-      capabilities: role.capabilities,
-      serverRole: role.id,
-      services: role.capabilities.filter(capability => capability.endsWith('Service'))
-    };
+    const configured = configuredServerForRole(role);
     if (serverPickerTarget) {
       setPlaced(current => current.map(item => item.instanceId === serverPickerTarget ? { ...item, ...configured, label: role.name } : item));
       setToast(`${role.name} configuration applied`);
@@ -572,12 +733,20 @@ function App() {
     } : item));
   }
 
+  function updateGateway(instanceId, value) {
+    setPlaced(current => current.map(item => item.instanceId === instanceId ? { ...item, gateway: value.trim() || null } : item));
+  }
+
   function updateSwitching(instanceId, switching, saved = false) {
     setPlaced(current => current.map(item => item.instanceId === instanceId ? { ...item, switching, ...(saved ? { startupSwitching: structuredClone(switching) } : {}) } : item));
   }
 
   function updateNgfw(instanceId, ngfw, interfaces, saved = false) {
     setPlaced(current => current.map(item => item.instanceId === instanceId ? { ...item, ngfw, interfaces, ...(saved ? { startupNgfw: structuredClone(ngfw), startupInterfaces: structuredClone(interfaces) } : {}) } : item));
+  }
+
+  function updateFirewall(instanceId, firewall, saved = false) {
+    setPlaced(current => current.map(item => item.instanceId === instanceId ? { ...item, firewall, ...(saved ? { startupFirewall: structuredClone(firewall) } : {}) } : item));
   }
 
   function updateRouter(instanceId, routerConfig, interfaces, saved = false) {
@@ -592,9 +761,10 @@ function App() {
   function connectPort(deviceId, portId) {
     const endpoint = { deviceId, portId };
     const selectedDevice = placed.find(item => item.instanceId === deviceId);
+    const selectedPort = getDeviceDefinition(selectedDevice?.id)?.ports.find(port => port.id === portId);
     if (selectedDevice?.switching?.ports?.[portId]?.enabled === false) return setToast('That switch port is shutdown. Use "no shutdown" before connecting it');
     const inUse = connections.some(connection => [connection.a, connection.b].some(end => end.deviceId === deviceId && end.portId === portId));
-    if (inUse) return setToast('That port is already connected');
+    if (inUse && !isSharedWirelessRadio(selectedPort)) return setToast('That port is already connected');
     if (!pendingPort) {
       setPendingPort(endpoint);
       const device = placed.find(item => item.instanceId === deviceId);
@@ -607,8 +777,8 @@ function App() {
     const secondDevice = placed.find(item => item.instanceId === deviceId);
     const firstPort = getDeviceDefinition(firstDevice?.id)?.ports.find(port => port.id === pendingPort.portId);
     const secondPort = getDeviceDefinition(secondDevice?.id)?.ports.find(port => port.id === portId);
-    const firstWireless = ['wireless', 'endpoint-wireless'].includes(firstPort?.kind);
-    const secondWireless = ['wireless', 'endpoint-wireless'].includes(secondPort?.kind);
+    const firstWireless = isWirelessPort(firstPort);
+    const secondWireless = isWirelessPort(secondPort);
     if (firstWireless !== secondWireless) return setToast('Wireless and Ethernet ports cannot be cabled together');
     const provisioning = provisionIspConnection(pendingPort, endpoint);
     if (provisioning?.error) return setToast(provisioning.error);
@@ -643,9 +813,13 @@ function App() {
   function chooseConnectionPort(portId) {
     if (!portPicker) return;
     const { deviceId, startFresh } = portPicker;
+    const device = placed.find(item => item.instanceId === deviceId);
+    const port = getDeviceDefinition(device?.id)?.ports.find(candidate => candidate.id === portId);
+    const inUse = connections.some(connection => [connection.a, connection.b].some(end => end.deviceId === deviceId && end.portId === portId));
+    const enabled = device?.switching?.ports?.[portId]?.enabled !== false;
+    if ((inUse && !isSharedWirelessRadio(port)) || !enabled) return;
     setPortPicker(null);
     if (startFresh) {
-      const device = placed.find(item => item.instanceId === deviceId);
       setPendingPort({ deviceId, portId });
       if (device) setConnectPointer({ x: device.x + 27, y: device.y + 23 });
       setToast('Now click the destination device');
@@ -663,19 +837,22 @@ function App() {
 
     const sourceDevice = activePendingPort && placed.find(item => item.instanceId === activePendingPort.deviceId);
     const sourcePort = activePendingPort && getDeviceDefinition(sourceDevice?.id)?.ports.find(port => port.id === activePendingPort.portId);
-    const sourceWireless = sourcePort && ['wireless', 'endpoint-wireless'].includes(sourcePort.kind);
-    const availablePorts = definition.ports.filter(port => {
+    const sourceWireless = sourcePort && isWirelessPort(sourcePort);
+    const compatiblePorts = definition.ports.filter(port => {
+      const wireless = isWirelessPort(port);
+      return !sourcePort || wireless === sourceWireless;
+    });
+    const availablePorts = compatiblePorts.filter(port => {
       const inUse = connections.some(connection => [connection.a, connection.b].some(end => end.deviceId === deviceId && end.portId === port.id));
-      const wireless = ['wireless', 'endpoint-wireless'].includes(port.kind);
       const enabled = device.switching?.ports?.[port.id]?.enabled !== false;
-      return !inUse && enabled && (!sourcePort || wireless === sourceWireless);
+      return (!inUse || isSharedWirelessRadio(port)) && enabled;
     });
     if (!availablePorts.length) return setToast(sourcePort ? 'No compatible enabled port is available on that device' : 'That device has no enabled free ports');
     setSelected(deviceId);
     setInspectorPanel('details');
-    const requiresExplicitPort = availablePorts.length > 1 && (device.id === 'switch-managed' || device.id.startsWith('firewall-') || device.id.startsWith('router-'));
+    const requiresExplicitPort = availablePorts.length > 1;
     if (requiresExplicitPort) {
-      setPortPicker({ deviceId, ports: availablePorts, startFresh, destination: Boolean(activePendingPort) });
+      setPortPicker({ deviceId, ports: compatiblePorts, startFresh, destination: Boolean(activePendingPort) });
       return;
     }
     if (startFresh) {
@@ -701,9 +878,10 @@ function App() {
   function canvasPoint(event) {
     const canvas = canvasRef.current;
     const bounds = canvas.getBoundingClientRect();
+    const uiScale = displayScale();
     return {
-      x: (event.clientX - bounds.left + canvas.scrollLeft) / (zoom / 100),
-      y: (event.clientY - bounds.top + canvas.scrollTop) / (zoom / 100)
+      x: ((event.clientX - bounds.left) / uiScale + canvas.scrollLeft) / (zoom / 100) - CANVAS_ORIGIN_X,
+      y: ((event.clientY - bounds.top) / uiScale + canvas.scrollTop) / (zoom / 100) - CANVAS_ORIGIN_Y
     };
   }
 
@@ -756,8 +934,9 @@ function App() {
   function handleCanvasPointerMove(event) {
     if (panRef.current) {
       const canvas = event.currentTarget;
-      canvas.scrollLeft = panRef.current.scrollLeft - (event.clientX - panRef.current.clientX);
-      canvas.scrollTop = panRef.current.scrollTop - (event.clientY - panRef.current.clientY);
+      const uiScale = displayScale();
+      canvas.scrollLeft = panRef.current.scrollLeft - (event.clientX - panRef.current.clientX) / uiScale;
+      canvas.scrollTop = panRef.current.scrollTop - (event.clientY - panRef.current.clientY) / uiScale;
       event.preventDefault();
       return;
     }
@@ -826,9 +1005,15 @@ function App() {
     setToast('Workspace cleared');
   }
 
-  function saveDesign() {
+  async function saveDesign() {
     localStorage.setItem('packettracker-design', JSON.stringify(serializeDesign(placed)));
-    setToast('Design saved locally');
+    if (onSave) {
+      try {
+        await onSave({ version: 2, devices: serializeDesign(placed), connections, notes, segments });
+        if (project?.id) localStorage.removeItem(projectDraftKey(project.id));
+        setToast('Project saved to your profile');
+      } catch (error) { setToast(error.message || 'Could not save project'); }
+    } else setToast('Design saved locally');
   }
 
   function exportDesign() {
@@ -843,18 +1028,19 @@ function App() {
 
   return <div className="app-shell">
     <header className="topbar">
-      <div className="brand"><div className="brand-mark"><Network size={20}/></div><span>Packet<span>Tracker</span></span></div>
-      <div className="file-name"><span>Untitled Network</span><ChevronDown size={14}/></div>
+      <div className="brand editor-brand"><img className="editor-brand-logo" src="/packettracker-logo-with-text.png" alt="PacketTracker"/></div>
+      <div className="project-header-nav"><span className="file-name">{project?.name || 'Untitled Network'}</span><button className="back-to-projects" onClick={onBack}>Back to projects</button></div>
       <div className="top-actions">
+        {assignmentSpec && <button className={`assignment-summary-button ${assignmentProgress}`} style={{ '--challenge-progress': `${assignmentPercent}%` }} onClick={() => setAssignmentPanelOpen(true)}><FilePlus2 size={17}/><span>Show challenge</span><small>{assignmentPassed} of {assignmentTotal} complete</small></button>}
         <button className="icon-button" title="Undo (Ctrl+Z)" disabled={!historyRef.current.past.length && !pendingHistoryRef.current} onClick={undoDesign}><Undo2 size={17}/></button>
         <button className="icon-button" title="Redo (Ctrl+Y)" disabled={!historyRef.current.future.length} onClick={redoDesign}><Redo2 size={17}/></button>
         <div className="divider" />
         <button className="button secondary" onClick={exportDesign}><Download size={16}/> Export</button>
-        <button className="button primary" onClick={saveDesign}><Save size={16}/> Save design</button>
+        <button className="button primary" disabled={readOnly} title={readOnly ? 'Shared projects are read-only' : 'Save project'} onClick={saveDesign}><Save size={16}/> {readOnly ? 'Read only' : 'Save project'}</button>
         <div className="profile-wrap">
-          <button className="avatar" onClick={() => setProfileOpen(value => !value)} aria-expanded={profileOpen} aria-label="Open profile settings">TF</button>
+          <button className="avatar" onClick={() => setProfileOpen(value => !value)} aria-expanded={profileOpen} aria-label="Open profile settings">{user?.name?.split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase() || 'PT'}</button>
           {profileOpen && <div className="profile-menu">
-            <div className="profile-summary"><span>TF</span><div><strong>Profile settings</strong><small>Local preferences</small></div></div>
+            <div className="profile-summary"><span>{user?.name?.[0]?.toUpperCase() || 'P'}</span><div><strong>{user?.name || 'Profile settings'}</strong><small>{user?.role || 'Local preferences'}</small></div></div>
             <button className="theme-toggle" onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')}>
               {theme === 'dark' ? <Moon size={16}/> : <Sun size={16}/>}<span><strong>Dark mode</strong><small>{theme === 'dark' ? 'On' : 'Off'}</small></span><i className={theme === 'dark' ? 'on' : ''}><b/></i>
             </button>
@@ -876,13 +1062,23 @@ function App() {
           <section className="device-panel">
             <div className="panel-title"><div><strong>{query ? 'Search results' : categories.find(c => c.id === activeCategory)?.label}</strong><span>{filtered.length} devices</span></div><button className="icon-button"><Ellipsis size={17}/></button></div>
             <div className="device-grid">
-              {filtered.map(device => <button key={device.id} className="device-card" aria-label={`Add ${device.name}`} draggable onDragStart={event => handleDeviceDragStart(event, device)} onClick={() => chooseDevice(device)}>
+              {filtered.map(device => device.id === 'server' ? <div key={device.id} className="device-card server-device-card">
+                <div className="server-card-overview">
+                  <div className="device-icon" style={{ '--device-color': device.color }}><device.icon size={25}/></div>
+                  <div className="device-summary"><span>{device.name}</span><p>Choose the service this host provides.</p><small>1 Ethernet interface</small></div>
+                </div>
+                <div className="server-type-palette">
+                  <strong>Drag and Drop server type</strong>
+                  <div>{serverRoles.map(role => <button key={role.id} draggable aria-label={`Add ${role.name}`} title={role.purpose} onDragStart={event => { event.stopPropagation(); handleDeviceDragStart(event, configuredServerForRole(role)); }} onClick={() => addDevice(configuredServerForRole(role))}>
+                    <role.icon size={15}/><span>{role.name.replace(' Server', '')}</span>
+                  </button>)}</div>
+                </div>
+              </div> : <button key={device.id} className="device-card" aria-label={`Add ${device.name}`} draggable onDragStart={event => handleDeviceDragStart(event, device)} onClick={() => chooseDevice(device)}>
                 <div className="device-icon" style={{ '--device-color': device.color }}><device.icon size={25}/></div>
                 <div className="device-summary">
                   <span>{device.name}</span>
                   <p>{device.purpose || device.model || 'A general-purpose network device.'}</p>
                   <small>{device.ports || 'Port details coming soon'}</small>
-                  {device.id === 'server' && <div className="server-role-preview">{serverRoles.map(role => <span key={role.id}>{role.name.replace(' Server', '')}</span>)}</div>}
                   {!!device.capabilities?.length && <div className="capability-list">{featureLabels(device.capabilities).map(feature => <span key={feature}>{feature}</span>)}</div>}
                 </div>
               </button>)}
@@ -895,6 +1091,7 @@ function App() {
       {!sidebarOpen && <button className="sidebar-opener" onClick={() => setSidebarOpen(true)}><PanelLeftOpen size={18}/></button>}
 
       <section className="canvas-wrap">
+        {assignmentSpec && assignmentPanelOpen && <AssignmentChallengeModal spec={assignmentSpec} evaluation={assignmentEvaluation} devices={placed} activeCategory={assignmentPanelCategory} onCategoryChange={setAssignmentPanelCategory} onClose={() => setAssignmentPanelOpen(false)}/>}
         <div className="canvas-toolbar">
           <button className={`tool ${activeTool === 'select' ? 'active' : ''}`} onClick={() => setTool('select')}><MousePointer2 size={17}/><span>Select</span></button>
           <button className={`tool ${activeTool === 'connect' ? 'active' : ''}`} onClick={() => setTool('connect')}><Cable size={17}/><span>Connect</span></button>
@@ -908,20 +1105,25 @@ function App() {
           <button className="tool zoom-tool" title="Zoom in" aria-label="Zoom in" disabled={zoom >= 150} onClick={() => setZoom(value => Math.min(150, value + 10))}><ZoomIn size={17}/></button>
         </div>
         {!!duplicateAlerts.length && <div className="topology-alert" role="alert"><TriangleAlert size={17}/><div><strong>Duplicate IP address detected</strong><span>{duplicateAlerts.map(alert => `${alert.address} — ${alert.names.join(' and ')}`).join(' · ')}</span></div></div>}
-        {activeTool !== 'select' && <div className="mode-hint">
+        {(activeTool !== 'select' || (pingDialog && !pingDialog.targetId)) && <div className="mode-hint">
           {activeTool === 'connect' && (pendingPort ? 'Now click the destination device to create the link' : 'Click the first device, then click the device you want to link')}
           {activeTool === 'area' && 'Drag across the canvas to select multiple devices'}
           {activeTool === 'note' && 'Click anywhere on the canvas to place a note'}
           {activeTool === 'segment' && 'Choose a label and color, then drag a box on the canvas'}
+          {pingDialog && !pingDialog.targetId && 'Ping: click another device on the workspace to test reachability · Esc to cancel'}
         </div>}
         {activeTool === 'segment' && <div className="segment-controls" onPointerDown={event => event.stopPropagation()}>
           <input aria-label="Segment label" value={segmentDraft.label} onChange={event => setSegmentDraft(current => ({ ...current, label: event.target.value }))} placeholder="Segment label" />
           <div className="segment-colors" aria-label="Segment color">{['#5f79ff', '#16a3a6', '#50a66c', '#d68a28', '#df5a60', '#7c62c8'].map(color => <button key={color} aria-label={`Use ${color}`} className={segmentDraft.color === color ? 'active' : ''} style={{ background: color }} onClick={() => setSegmentDraft(current => ({ ...current, color }))}/>)}</div>
         </div>}
-        <div ref={canvasRef} className={`canvas tool-${connectionActive ? 'connect' : activeTool} ${isPanning ? 'panning' : ''}`} onContextMenu={handleCanvasContextMenu} onDragOver={e => e.preventDefault()} onDrop={e => {
-          e.preventDefault(); const device = devices.find(d => d.id === e.dataTransfer.getData('deviceId')); if (device) addDevice(device, e);
+        <div ref={canvasRef} className={`canvas tool-${pingDialog && !pingDialog.targetId ? 'ping' : connectionActive ? 'connect' : activeTool} ${isPanning ? 'panning' : ''}`} onScroll={persistEditorScroll} onContextMenu={handleCanvasContextMenu} onDragOver={e => e.preventDefault()} onDrop={e => {
+          e.preventDefault();
+          const device = devices.find(d => d.id === e.dataTransfer.getData('deviceId'));
+          const serverRole = serverRoles.find(role => role.id === e.dataTransfer.getData('serverRole'));
+          if (device) addDevice(serverRole ? configuredServerForRole(serverRole) : device, e);
         }} onPointerDown={handleCanvasPointerDown} onPointerMove={handleCanvasPointerMove} onPointerUp={handleCanvasPointerUp} onPointerCancel={handleCanvasPointerUp}>
-          <div className="canvas-content" style={{ transform: `scale(${zoom / 100})` }}>
+          <div className="canvas-content" style={{ width: CANVAS_WIDTH * (zoom / 100), height: CANVAS_HEIGHT * (zoom / 100) }}>
+          <div className="canvas-world" style={{ left: CANVAS_ORIGIN_X * (zoom / 100), top: CANVAS_ORIGIN_Y * (zoom / 100), transform: `scale(${zoom / 100})` }}>
             {segments.map(segment => <NetworkSegment key={segment.id} segment={segment} selected={selectedArtifact?.type === 'segment' && selectedArtifact.id === segment.id} zoom={zoom} cancelToken={cancelToken} onSelect={() => { setSelectedArtifact({ type: 'segment', id: segment.id }); setSelected(null); setSelectedIds([]); setSelectedConnection(null); }} onChange={updates => setSegments(current => current.map(item => item.id === segment.id ? { ...item, ...updates } : item))} onDelete={() => { setSegments(current => current.filter(item => item.id !== segment.id)); setSelectedArtifact(null); }}/>) }
             {segmentDrawing && <div className="network-segment drawing" style={{
               '--segment-color': segmentDraft.color,
@@ -935,7 +1137,10 @@ function App() {
                 const a = placed.find(item => item.instanceId === connection.a.deviceId);
                 const b = placed.find(item => item.instanceId === connection.b.deviceId);
                 const validation = connectionValidations.get(connection.id);
-                return a && b ? <g key={connection.id} className={`${selectedConnection === connection.id ? 'selected' : ''} status-${validation?.status || 'unevaluated'} ${validation?.type === 'Trunk' ? 'trunk' : ''}`} style={{ '--connection-label-color': connection.color || '#6e7d89' }}>
+                const aPort = getDeviceDefinition(a?.id)?.ports.find(port => port.id === connection.a.portId);
+                const bPort = getDeviceDefinition(b?.id)?.ports.find(port => port.id === connection.b.portId);
+                const wireless = [aPort, bPort].some(port => ['wireless', 'endpoint-wireless'].includes(port?.kind));
+                return a && b ? <g key={connection.id} className={`${selectedConnection === connection.id ? 'selected' : ''} status-${validation?.status || 'unevaluated'} ${validation?.type === 'Trunk' ? 'trunk' : ''} ${wireless ? 'wireless-link' : ''}`} style={{ '--connection-label-color': connection.color || '#6e7d89' }}>
                   {validation?.type === 'Trunk' && validation.vlanStatuses?.length ? validation.vlanStatuses.map((vlanState, index) => {
                     const line = parallelConnectionLine(a, b, index, validation.vlanStatuses.length);
                     return <g className={`trunk-strand ${vlanState.status}`} key={vlanState.vlan}>
@@ -944,7 +1149,8 @@ function App() {
                       <text className="vlan-strand-label" x={line.midX} y={line.midY - 4} textAnchor="middle">VLAN {vlanState.vlan}</text>
                     </g>;
                   }) : <><line className="connection-status-outline" x1={a.x + 27} y1={a.y + 23} x2={b.x + 27} y2={b.y + 23}/><line className="connection-line" x1={a.x + 27} y1={a.y + 23} x2={b.x + 27} y2={b.y + 23}/></>}
-                  {connection.label && <text className="connection-label" x={(a.x + b.x) / 2 + 27} y={(a.y + b.y) / 2 + 18} textAnchor="middle">{connection.label}</text>}
+                  {wireless && <g className="wireless-connection-marker" transform={`translate(${(a.x + b.x) / 2 + 27} ${(a.y + b.y) / 2 + 23})`}><circle r="13"/><path d="M -7 -2 Q 0 -9 7 -2"/><path d="M -4 2 Q 0 -2 4 2"/><circle className="wireless-dot" cy="6" r="1.6"/></g>}
+                  {connection.label && <text className="connection-label" x={(a.x + b.x) / 2 + 27} y={(a.y + b.y) / 2 + (wireless ? 3 : 18)} textAnchor="middle">{connection.label}</text>}
                   <line className="connection-hit" style={{ strokeWidth: Math.max(20, (validation?.vlanStatuses?.length || 1) * 9 + 12) }} x1={a.x + 27} y1={a.y + 23} x2={b.x + 27} y2={b.y + 23} onPointerDown={event => { event.stopPropagation(); setContextMenu(null); setSelectedConnection(connection.id); setSelected(null); setSelectedIds([]); setSelectedArtifact(null); }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setSelectedConnection(connection.id); setSelected(null); setSelectedIds([]); setSelectedArtifact(null); setContextMenu({ type: 'connection', x: event.clientX, y: event.clientY, connectionId: connection.id }); }}/>
                 </g> : null;
               })}
@@ -966,11 +1172,15 @@ function App() {
               <button className="button primary" onClick={() => addDevice(devices[0])}><Plus size={16}/> Add a router</button>
             </div>}
             {notes.map(note => <CanvasNote key={note.id} note={note} selected={selectedArtifact?.type === 'note' && selectedArtifact.id === note.id} onSelect={() => { setSelectedArtifact({ type: 'note', id: note.id }); setSelected(null); setSelectedIds([]); setSelectedConnection(null); }} onChange={text => setNotes(current => current.map(item => item.id === note.id ? { ...item, text } : item))} onDelete={() => { setNotes(current => current.filter(item => item.id !== note.id)); setSelectedArtifact(null); }}/>) }
-            {placed.map(item => <PlacedDevice key={item.instanceId} item={item} ipConflicts={duplicateIpConflicts.get(item.instanceId) || []} selected={selected === item.instanceId || selectedIds.includes(item.instanceId)} interactionMode={connectionActive ? 'connect' : activeTool} cancelToken={cancelToken} onConnect={connectDevice} onContextMenu={event => {
+            {placed.map(item => <PlacedDevice key={item.instanceId} item={item} ipConflicts={duplicateIpConflicts.get(item.instanceId) || []} selected={selected === item.instanceId || selectedIds.includes(item.instanceId)} pingSource={pingDialog && !pingDialog.targetId && pingDialog.sourceId === item.instanceId} interactionMode={pingDialog && !pingDialog.targetId ? 'ping' : connectionActive ? 'connect' : activeTool} zoom={zoom} cancelToken={cancelToken} onPingTarget={instanceId => {
+              if (instanceId === pingDialog.sourceId) return setToast('Choose a different device to ping');
+              setPingDialog(current => ({ ...current, targetId: instanceId }));
+            }} onConnect={connectDevice} onContextMenu={event => {
               event.preventDefault(); event.stopPropagation();
               setSelected(item.instanceId); setSelectedIds([]); setSelectedArtifact(null); setSelectedConnection(null);
-              setContextMenu({ x: event.clientX, y: event.clientY, deviceId: item.instanceId, managed: item.id === 'switch-managed' || item.id === 'firewall-ngfw', server: item.id === 'server', serverRole: item.serverRole || 'generic' });
+              setContextMenu({ x: event.clientX, y: event.clientY, deviceId: item.instanceId, managed: ['switch-managed', 'firewall-stateless', 'firewall-stateful', 'firewall-ngfw', 'router-advanced'].includes(item.id), server: item.id === 'server', serverRole: item.serverRole || 'generic' });
             }} onSelect={instanceId => { setSelected(instanceId); if (!selectedIds.includes(instanceId)) setSelectedIds([]); setSelectedArtifact(null); setSelectedConnection(null); setInspectorPanel('details'); }} onMove={moveDevice} onDelete={() => { setPlaced(current => current.filter(d => d.instanceId !== item.instanceId)); setConnections(current => current.filter(connection => connection.a.deviceId !== item.instanceId && connection.b.deviceId !== item.instanceId)); setSelected(null); setSelectedConnection(null); }} />)}
+          </div>
           </div>
         </div>
         <div className="statusbar">
@@ -981,6 +1191,7 @@ function App() {
           item={placed.find(item => item.instanceId === selected)}
           onClose={() => setSelected(null)}
           onInterfaceChange={updateInterface}
+          onGatewayChange={updateGateway}
           connectMode={connectMode}
           pendingPort={pendingPort}
           connections={connections}
@@ -1005,16 +1216,26 @@ function App() {
       return connection ? <div className="device-context-menu connection-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={event => event.stopPropagation()}>
         {connection.provisioning && <div className="isp-connection-details"><span>ISP-provided settings</span><dl><div><dt>Assigned IP</dt><dd>{connection.provisioning.address}/{connection.provisioning.prefix}</dd></div><div><dt>Subnet mask</dt><dd>{connection.provisioning.subnetMask}</dd></div><div><dt>Default gateway</dt><dd>{connection.provisioning.gateway}</dd></div></dl></div>}
         <label className="context-label-row"><span><strong>Connection label</strong><small>Shown directly on the link</small></span><input type="text" value={connection.label || ''} placeholder="Optional label" maxLength="40" onChange={event => setConnections(current => current.map(item => item.id === connection.id ? { ...item, label: event.target.value } : item))}/></label>
-        <div className="context-color-row"><span><strong>Label accent</strong><small>Cable color now shows live status</small></span><input className="segment-color-input" type="color" value={connection.color || '#6e7d89'} onChange={event => setConnections(current => current.map(item => item.id === connection.id ? { ...item, color: event.target.value } : item))} aria-label="Choose connection label accent" /></div>
+        <div className="context-color-row"><span><strong>Connection color</strong><small>Main link color; health appears on the outer edge</small></span><input className="segment-color-input" type="color" value={connection.color || '#6e7d89'} onChange={event => setConnections(current => current.map(item => item.id === connection.id ? { ...item, color: event.target.value } : item))} aria-label="Choose connection color" /></div>
         <div className="segment-colors connection-colors" aria-label="Connection color presets">{['#5f79ff', '#16a3a6', '#50a66c', '#d68a28', '#df5a60', '#7c62c8'].map(color => <button key={color} aria-label={`Use ${color}`} className={(connection.color || '#6e7d89') === color ? 'active' : ''} style={{ background: color }} onClick={() => setConnections(current => current.map(item => item.id === connection.id ? { ...item, color } : item))}/>)}</div>
         <button className="context-danger" onClick={() => { removeConnectionById(connection.id); setSelectedConnection(null); setContextMenu(null); setToast('Connection deleted'); }}><Trash2 size={15}/><span><strong>Delete connection</strong><small>Keep both connected devices</small></span></button>
       </div> : null;
     })()}
     {contextMenu && contextMenu.type !== 'connection' && <div className="device-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={event => event.stopPropagation()}>
+      <button onClick={() => { const sourceId = contextMenu.deviceId; setPingDialog({ sourceId, targetId: null }); setSelected(null); setSelectedIds([]); setSelectedArtifact(null); setSelectedConnection(null); setContextMenu(null); }}><Send size={15}/><span><strong>Ping</strong><small>Test reachability to another device</small></span></button>
       <button onClick={() => { const deviceId = contextMenu.deviceId; setActiveTool('select'); setPendingPort(null); setPortPicker(null); setConnectPointer(null); setAreaSelection(null); setSegmentDrawing(null); setSelectedIds([]); setSelected(deviceId); setContextMenu(null); connectDevice(deviceId, true); }}><Cable size={15}/><span><strong>Connect</strong><small>Start a temporary link interaction</small></span></button>
-      {contextMenu.managed && <button onClick={() => { setInspectorPanel('cli'); setSelected(contextMenu.deviceId); setContextMenu(null); }}><EthernetPort size={15}/><span><strong>Manage</strong><small>Open device command line</small></span></button>}
+      {contextMenu.managed && <button onClick={() => { setCliDeviceId(contextMenu.deviceId); setSelected(null); setContextMenu(null); }}><EthernetPort size={15}/><span><strong>Manage</strong><small>Open device command line</small></span></button>}
       {contextMenu.server && <button onClick={() => { setServerRoleDraft(contextMenu.serverRole); setServerPickerTarget(contextMenu.deviceId); setServerPickerOpen(true); setContextMenu(null); }}><Server size={15}/><span><strong>Change server role</strong><small>Choose DNS, DHCP, web, email, or file</small></span></button>}
+      {assignmentSpec && (() => {
+        const device = placed.find(item => item.instanceId === contextMenu.deviceId);
+        const compatibleRoles = assignmentSpec.roles.filter(role => role.deviceTypes.includes(device?.id));
+        if (!compatibleRoles.length) return null;
+        if (!contextMenu.roleMenu) return <button onClick={() => setContextMenu(current => ({ ...current, roleMenu: true }))}><Users size={15}/><span><strong>Assign role</strong><small>{device.assignmentRoleName || 'Choose an assignment role'}</small></span><ChevronRight size={14}/></button>;
+        return <div className="context-role-menu"><span>Assignment role</span>{compatibleRoles.map(role => <button key={role.id} className={device.assignmentRoleId === role.id ? 'active' : ''} onClick={() => { setPlaced(current => current.map(item => item.instanceId === device.instanceId ? { ...item, assignmentRoleId: role.id, assignmentRoleName: role.name } : item)); setContextMenu(null); }}><strong>{role.name}</strong><small>{placed.filter(item => item.assignmentRoleId === role.id).length}/{role.count} assigned</small></button>)}{device.assignmentRoleId && <button className="remove-role" onClick={() => { setPlaced(current => current.map(item => item.instanceId === device.instanceId ? { ...item, assignmentRoleId: null, assignmentRoleName: null } : item)); setContextMenu(null); }}>Remove role</button>}</div>;
+      })()}
     </div>}
+    {pingDialog?.targetId && <PingDialog sourceId={pingDialog.sourceId} targetId={pingDialog.targetId} devices={placed} connections={connections} onClose={() => setPingDialog(null)}/>}
+    {cliDeviceId && <CliDialog item={placed.find(item => item.instanceId === cliDeviceId)} onSwitchingChange={updateSwitching} onNgfwChange={updateNgfw} onFirewallChange={updateFirewall} onRouterChange={updateRouter} onDone={() => setCliDeviceId(null)}/>}
     {serverPickerOpen && <div className="modal-backdrop" onPointerDown={() => setServerPickerOpen(false)}>
       <section className="server-picker" role="dialog" aria-modal="true" aria-labelledby="server-picker-title" onPointerDown={event => event.stopPropagation()}>
         <div className="server-picker-header"><div><span>Configure device</span><h2 id="server-picker-title">Choose a server role</h2><p>Select the primary service this server will provide.</p></div><button className="icon-button" onClick={() => setServerPickerOpen(false)}><X size={17}/></button></div>
@@ -1036,16 +1257,157 @@ function App() {
           <div className="port-picker-list">{portPicker.ports.map(port => {
             const switchPort = device?.switching?.ports?.[port.id];
             const vlanName = switchPort ? device.switching.vlans?.[switchPort.accessVlan] : null;
-            return <button key={port.id} onClick={() => chooseConnectionPort(port.id)}>
-              <span className={`port-symbol ${port.kind}`}><EthernetPort size={17}/></span>
-              <span><strong>{port.label}</strong><small>{describePort(port)}</small></span>
-              {switchPort ? <span className="port-picker-meta"><b>VLAN {switchPort.accessVlan}</b><small>{vlanName || 'Unnamed'}</small></span> : <span className="port-picker-meta"><b>{port.kind === 'routed' ? 'Routed' : 'Available'}</b><small>Free port</small></span>}
+            const portLinks = connections.filter(connection => [connection.a, connection.b].some(end => end.deviceId === device?.instanceId && end.portId === port.id));
+            const link = portLinks[0];
+            const peerEnd = link && (link.a.deviceId === device.instanceId && link.a.portId === port.id ? link.b : link.a);
+            const peer = peerEnd && placed.find(item => item.instanceId === peerEnd.deviceId);
+            const peerPort = peerEnd && getDeviceDefinition(peer?.id)?.ports.find(candidate => candidate.id === peerEnd.portId);
+            const shutdown = switchPort?.enabled === false;
+            const sharedRadio = isSharedWirelessRadio(port);
+            const unavailable = Boolean((link && !sharedRadio) || shutdown);
+            return <button key={port.id} disabled={unavailable} onClick={() => chooseConnectionPort(port.id)}>
+              <span className={`port-symbol ${port.kind}`}>{isWirelessPort(port) ? <Wifi size={17}/> : <EthernetPort size={17}/>}</span>
+              <span><strong>{port.label}</strong><small>{sharedRadio && link ? `${portLinks.length} wireless ${portLinks.length === 1 ? 'client' : 'clients'} associated` : link ? `Connected to ${peer?.customName || peer?.name || 'unknown device'}${peerPort ? ` · ${peerPort.label}` : ''}` : shutdown ? 'Administratively shutdown' : describePort(port)}</small></span>
+              {sharedRadio ? <span className="port-picker-meta"><b>Wi-Fi radio</b><small>{link ? 'Available for another client' : 'Available'}</small></span> : link ? <span className="port-picker-meta occupied"><b>In use</b><small>{peer?.customName || peer?.name || 'Connected'}</small></span> : shutdown ? <span className="port-picker-meta shutdown"><b>Shutdown</b><small>Enable this port first</small></span> : switchPort ? <span className="port-picker-meta"><b>VLAN {switchPort.accessVlan}</b><small>{vlanName || 'Unnamed'}</small></span> : <span className="port-picker-meta"><b>{port.kind === 'routed' ? 'Routed' : 'Available'}</b><small>Free port</small></span>}
             </button>;
           })}</div>
           <div className="server-picker-actions"><button className="button secondary" onClick={() => setPortPicker(null)}>Cancel</button></div>
         </section>
       </div>;
     })()}
+  </div>;
+}
+
+function AssignmentChallengeModal({ spec, evaluation, devices, activeCategory, onCategoryChange, onClose }) {
+  const [expandedRequirements, setExpandedRequirements] = useState(() => new Set());
+  const relationships = evaluation.requirements.filter(item => item.type === 'relationship');
+  const allowedRelationships = relationships.filter(item => item.action === 'allow');
+  const blockedRelationships = relationships.filter(item => item.action === 'deny');
+  const constraints = evaluation.requirements.filter(item => item.type === 'constraint');
+  const roleNames = new Map(spec.roles.map(role => [role.id, role.name]));
+  const deviceNames = new Map(devices.map(device => [device.instanceId, device.customName || device.name]));
+  const devicesById = new Map(devices.map(device => [device.instanceId, device]));
+  const points = assignmentPointBreakdown(spec, evaluation);
+  const categories = [
+    { id: 'overview', label: 'Overview', icon: FilePlus2, ...points.all },
+    { id: 'devices', label: 'Devices & roles', icon: Users, ...points.devices },
+    { id: 'must-connect', label: 'Must connect', icon: Cable, ...points.connect },
+    { id: 'must-block', label: 'Must be blocked', icon: ShieldCheck, ...points.block },
+    { id: 'segmentation', label: 'Segmentation', icon: Grid3X3, ...points.segmentation }
+  ];
+  useEffect(() => {
+    const closeOnEscape = event => { if (event.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [onClose]);
+
+  const statusLabel = status => status === 'not_evaluable' ? 'Not ready' : status === 'passed' ? 'Complete' : 'Needs work';
+  const requirementTitle = requirement => requirement.type === 'relationship'
+    ? `${roleNames.get(requirement.from) || requirement.from} → ${roleNames.get(requirement.to) || requirement.to}`
+    : `Separate ${requirement.roles.map(role => roleNames.get(role) || role).join(' and ')}`;
+  const requirementDescription = requirement => requirement.type === 'relationship'
+    ? requirement.action === 'allow'
+      ? `${roleNames.get(requirement.from) || requirement.from} must be able to ${requirement.layer === 'l2' ? 'communicate on the same local network with' : 'ping'} ${roleNames.get(requirement.to) || requirement.to}.`
+      : `${roleNames.get(requirement.from) || requirement.from} must not be able to initiate communication with ${roleNames.get(requirement.to) || requirement.to}.`
+    : 'These roles must remain in separate Layer 2 broadcast domains.';
+  const friendlyReason = check => {
+    if (check.status === 'passed') return check.expected === 'deny' ? 'Communication is correctly blocked by a working security policy.' : 'Communication is working as required.';
+    if (check.observed === 'disconnected') return 'Both devices must be connected before this can be tested.';
+    if (check.observed === 'unconfigured') return 'Both devices need valid IP address settings before this can be tested.';
+    if (check.expected === 'deny' && check.status === 'not_evaluable') return 'The devices cannot communicate yet, but the network is not working well enough to prove that a security rule is blocking them.';
+    if (check.expected === 'allow') return 'PacketTracker could not find a working path. Check the connections, VLANs, IP addresses, gateways, and routing.';
+    return 'Communication is currently allowed, but this requirement says it must be blocked.';
+  };
+  const checkOutcome = check => check.status === 'passed' ? check.expected === 'deny' ? 'Correctly blocked' : 'Working' : check.status === 'not_evaluable' ? 'Not ready' : check.expected === 'deny' ? 'Not blocked' : 'Not working';
+  const deviceWithAddress = deviceId => {
+    const device = devicesById.get(deviceId);
+    return { name: deviceNames.get(deviceId) || 'Unassigned device', address: devicePrimaryAddress(device) || 'No IP address' };
+  };
+  const toggleRequirement = requirementId => setExpandedRequirements(current => {
+    const next = new Set(current);
+    if (next.has(requirementId)) next.delete(requirementId); else next.add(requirementId);
+    return next;
+  });
+  const relationshipCards = items => items.length ? items.map(requirement => {
+    const passedChecks = requirement.checks?.filter(check => check.status === 'passed').length || 0;
+    const totalChecks = requirement.checks?.length || 0;
+    const expanded = expandedRequirements.has(requirement.id);
+    const endpointGroups = [requirement.from, requirement.to].map(roleId => ({ roleId, name: roleNames.get(roleId) || roleId, devices: devices.filter(device => device.assignmentRoleId === roleId) }));
+    return <article className={`challenge-requirement collapsible ${requirement.status} ${expanded ? 'expanded' : ''}`} key={requirement.id}>
+      <button className="challenge-requirement-toggle" onClick={() => toggleRequirement(requirement.id)} aria-expanded={expanded}>
+        <span className="challenge-requirement-main"><span className="challenge-requirement-status"><i/><span>{statusLabel(requirement.status)}</span></span><strong>{requirementTitle(requirement)}</strong><small>{requirementDescription(requirement)}</small><span className="challenge-card-progress"><b>{passedChecks}/{totalChecks || 1}</b><span>{requirement.action === 'allow' ? 'connections working' : 'connections correctly blocked'}</span></span></span>
+        <ChevronDown size={21}/>
+      </button>
+      {expanded && <div className="challenge-requirement-expanded"><div className="challenge-assigned-endpoints">{endpointGroups.map(group => <section key={group.roleId}><strong>{group.name}</strong>{group.devices.length ? group.devices.map(device => <span key={device.instanceId}>{device.customName || device.name}<em>{devicePrimaryAddress(device) || 'No IP address'}</em></span>) : <small>No device assigned</small>}</section>)}</div>{requirement.reason && <div className="challenge-reason">Assign devices to both roles before this requirement can be tested.</div>}{!!requirement.checks?.length && <div className="challenge-check-list">{requirement.checks.map(check => { const source = deviceWithAddress(check.sourceDeviceId), destination = deviceWithAddress(check.destinationDeviceId); return <div className={check.status} key={check.id}><i/><span><span className="challenge-device-pair"><span>{source.name}<em>{source.address}</em></span><b>→</b><span>{destination.name}<em>{destination.address}</em></span></span><small>{friendlyReason(check)}</small></span><b>{checkOutcome(check)}</b></div>; })}</div>}</div>}
+    </article>;
+  }) : <div className="challenge-empty">There are no requirements in this section.</div>;
+
+  return <div className="challenge-modal-backdrop" onPointerDown={onClose}>
+    <section className="challenge-modal" role="dialog" aria-modal="true" aria-labelledby="challenge-title" onPointerDown={event => event.stopPropagation()}>
+      <header className="challenge-modal-header"><div><span>Network challenge</span><h2 id="challenge-title">{spec.scenario.title}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close challenge"><X size={19}/></button></header>
+      <div className="challenge-modal-layout">
+        <nav className="challenge-categories" aria-label="Challenge categories">
+          {categories.map(category => <button key={category.id} className={activeCategory === category.id ? 'active' : ''} onClick={() => onCategoryChange(category.id)}><category.icon size={18}/><span><strong>{category.label}</strong><small>{category.passed}/{category.total} complete</small></span><b className={category.passed === category.total ? 'complete' : ''}>{category.passed}/{category.total}</b></button>)}
+        </nav>
+        <main className="challenge-details">
+          {activeCategory === 'overview' && <><div className="challenge-section-heading"><span>Challenge brief</span><h3>{spec.scenario.title}</h3></div><p className="challenge-description">{spec.scenario.description}</p>{!!spec.scenario.objectives?.length && <section className="challenge-objectives"><h4>Objectives</h4>{spec.scenario.objectives.map((objective, index) => <div key={index}><i/>{objective}</div>)}</section>}<div className="challenge-overall-progress"><strong>{points.all.passed} of {points.all.total} checks complete</strong><span>{points.all.total - points.all.passed} individual checks remaining</span></div></>}
+          {activeCategory === 'devices' && <><div className="challenge-section-heading"><span>Required equipment</span><h3>Devices and assignment roles</h3><p>Place compatible devices, then right-click each one and assign its role.</p></div><div className="challenge-requirement-list">{evaluation.roleStatus.map(role => { const definition = spec.roles.find(item => item.id === role.roleId); return <article className={`challenge-requirement ${role.status}`} key={role.roleId}><div className="challenge-requirement-status"><i/><span>{statusLabel(role.status)}</span></div><h4>{role.name}</h4><p>Assign exactly {role.required} compatible {role.required === 1 ? 'device' : 'devices'} to this role.</p><dl><div><dt>Assigned</dt><dd>{role.assigned}/{role.required}</dd></div><div><dt>Compatible types</dt><dd>{definition?.deviceTypes.join(', ') || 'None'}</dd></div></dl></article>; })}</div></>}
+          {activeCategory === 'must-connect' && <><div className="challenge-section-heading"><span>Required communication</span><h3>Who must be able to connect?</h3><p>Make every communication path below work in the direction shown.</p></div><div className="challenge-requirement-list">{relationshipCards(allowedRelationships)}</div></>}
+          {activeCategory === 'must-block' && <><div className="challenge-section-heading"><span>Required protection</span><h3>Who must be blocked?</h3><p>Use a working security policy to prevent the communication shown below. A broken or disconnected network does not count as successfully blocked.</p></div><div className="challenge-requirement-list">{relationshipCards(blockedRelationships)}</div></>}
+          {activeCategory === 'segmentation' && <><div className="challenge-section-heading"><span>Local network separation</span><h3>Who must be kept on separate networks?</h3><p>Devices listed here must not share the same local broadcast network.</p></div><div className="challenge-requirement-list">{constraints.length ? constraints.map(requirement => <article className={`challenge-requirement ${requirement.status}`} key={requirement.id}><div className="challenge-requirement-status"><i/><span>{statusLabel(requirement.status)}</span></div><h4>{requirementTitle(requirement)}</h4><p>{requirementDescription(requirement)}</p>{!!requirement.checks?.length && <div className="challenge-check-list">{requirement.checks.map(check => <div className={check.status} key={check.id}><i/><span>{deviceNames.get(check.sourceDeviceId) || 'First device'} ↔ {deviceNames.get(check.destinationDeviceId) || 'Second device'}<small>{check.status === 'passed' ? 'These devices are correctly placed on separate local networks.' : 'These devices are still sharing the same local network.'}</small></span><b>{check.status === 'passed' ? 'Separated' : 'Needs work'}</b></div>)}</div>}</article>) : <div className="challenge-empty">This challenge has no network-separation requirements.</div>}</div></>}
+        </main>
+      </div>
+    </section>
+  </div>;
+}
+
+function PingDialog({ sourceId, targetId, devices, connections, onClose }) {
+  const source = devices.find(device => device.instanceId === sourceId);
+  const destination = devices.find(device => device.instanceId === targetId);
+  const result = useMemo(() => runPing(devices, connections, sourceId, targetId), [devices, connections, sourceId, targetId]);
+  const [visibleLines, setVisibleLines] = useState([]);
+  const outputRef = useRef(null);
+
+  useEffect(() => {
+    if (!result) return;
+    setVisibleLines([]);
+    let index = 0;
+    let timer;
+    const revealNextLine = () => {
+      index += 1;
+      setVisibleLines(result.lines.slice(0, index));
+      if (index >= result.lines.length) return;
+      const line = result.lines[index] || '';
+      const isPingAttempt = line.startsWith('Reply from ') || line.startsWith('Destination host unreachable') || line.startsWith('TTL expired');
+      timer = setTimeout(revealNextLine, isPingAttempt ? 1250 : 180);
+    };
+    timer = setTimeout(revealNextLine, 250);
+    return () => clearTimeout(timer);
+  }, [result]);
+  useEffect(() => { if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight; }, [visibleLines]);
+
+  return <div className="modal-backdrop" onPointerDown={onClose}>
+    <section className="ping-dialog" role="dialog" aria-modal="true" aria-labelledby="ping-dialog-title" onPointerDown={event => event.stopPropagation()}>
+      <div className="server-picker-header"><div><span>Network diagnostic</span><h2 id="ping-dialog-title">Ping results</h2><p>{source?.customName || source?.name || 'Device'} → {destination?.customName || destination?.name || 'Destination'}</p></div><button className="icon-button" onClick={onClose} aria-label="Close ping"><X size={17}/></button></div>
+      <div className="ping-terminal" ref={outputRef} aria-live="polite">
+        {visibleLines.map((line, index) => <div key={`${index}-${line}`}>{line || ' '}</div>)}
+        {visibleLines.length < result.lines.length && <span className="terminal-cursor" aria-hidden="true">_</span>}
+      </div>
+      <div className="ping-dialog-footer"><span><i className={result ? (result.delivered ? 'success' : 'failure') : ''}/>{result ? (result.delivered ? 'Reachable' : 'Unreachable') : 'Ready'}</span><button className="button secondary" onClick={onClose}>Close</button></div>
+    </section>
+  </div>;
+}
+
+function CliDialog({ item, onSwitchingChange, onNgfwChange, onFirewallChange, onRouterChange, onDone }) {
+  if (!item) return null;
+  return <div className="modal-backdrop cli-backdrop">
+    <section className="cli-dialog" role="dialog" aria-modal="true" aria-labelledby="cli-dialog-title" onPointerDown={event => event.stopPropagation()}>
+      <div className="cli-dialog-header"><div><span>Device command line</span><h2 id="cli-dialog-title">{item.customName || item.name}</h2></div><p>Finish with <code>end</code>, or use <code>exit</code> from the top-level prompt.</p></div>
+      {item.id === 'switch-managed' && <ManagedSwitchTerminal item={item} onSwitchingChange={onSwitchingChange} onDone={onDone}/>}
+      {item.id === 'firewall-ngfw' && <NgfwTerminal item={item} onNgfwChange={onNgfwChange} onFirewallChange={onFirewallChange} onDone={onDone}/>}
+      {['firewall-stateless', 'firewall-stateful'].includes(item.id) && <FirewallPolicyTerminal item={item} onFirewallChange={onFirewallChange} onDone={onDone}/>}
+      {item.id === 'router-advanced' && <RouterTerminal item={item} onRouterChange={onRouterChange} onDone={onDone}/>}
+    </section>
   </div>;
 }
 
@@ -1076,9 +1438,10 @@ function NetworkSegment({ segment, selected, zoom, cancelToken, onSelect, onChan
   function continueInteraction(event) {
     if (!interaction.current) return;
     const start = interaction.current;
-    const dx = (event.clientX - start.clientX) / (zoom / 100);
-    const dy = (event.clientY - start.clientY) / (zoom / 100);
-    if (start.mode === 'move') onChange({ x: Math.max(0, start.x + dx), y: Math.max(0, start.y + dy) });
+    const movementScale = displayScale() * (zoom / 100);
+    const dx = (event.clientX - start.clientX) / movementScale;
+    const dy = (event.clientY - start.clientY) / movementScale;
+    if (start.mode === 'move') onChange({ x: Math.max(-CANVAS_ORIGIN_X + 20, start.x + dx), y: Math.max(-CANVAS_ORIGIN_Y + 20, start.y + dy) });
     else onChange({ width: Math.max(80, start.width + dx), height: Math.max(55, start.height + dy) });
   }
 
@@ -1124,8 +1487,9 @@ function ConnectionInspector({ connection, validation, width, onWidthChange, onC
   }
   function continueResize(event) {
     if (!resize.current) return;
-    const maximum = Math.max(320, Math.min(640, window.innerWidth - 120));
-    onWidthChange(Math.max(260, Math.min(maximum, resize.current.width + resize.current.x - event.clientX)));
+    const uiScale = displayScale();
+    const maximum = Math.max(320, Math.min(640, window.innerWidth / uiScale - 120));
+    onWidthChange(Math.max(260, Math.min(maximum, resize.current.width + (resize.current.x - event.clientX) / uiScale)));
   }
 
   return <aside className="inspector connection-inspector" style={{ width }} onPointerDown={event => event.stopPropagation()}>
@@ -1138,7 +1502,7 @@ function ConnectionInspector({ connection, validation, width, onWidthChange, onC
         return <div key={`${endpoint.endpoint.deviceId}-${endpoint.endpoint.portId}`}><EthernetPort size={14}/><span><strong>{endpoint.device?.customName || endpoint.device?.name || 'Unknown device'}</strong><small>{endpoint.port?.label || endpoint.endpoint.portId}{modeDetail ? ` · ${modeDetail}` : ''}</small></span></div>;
       })}</div></section>
       <section className="inspector-section"><h3>Validation by layer</h3><div className="validation-layers">{Object.entries(validation.layers).map(([layer, state]) => <div key={layer}><i className={state.status}/><span><strong>{layer === 'layer2' ? 'Layer 2' : layer === 'layer3' ? 'Layer 3' : layer[0].toUpperCase() + layer.slice(1)}</strong><small>{state.detail}</small></span></div>)}</div></section>
-      {validation.type === 'Trunk' && <section className="inspector-section"><h3>Trunk VLANs</h3><div className="trunk-vlan-detail"><div><span>Configured</span><strong>{validation.configuredVlans.length ? validation.configuredVlans.join(', ') : 'None'}</strong></div><div><span>Operational</span><strong>{validation.operationalVlans.length ? validation.operationalVlans.join(', ') : 'None'}</strong></div></div><div className="trunk-vlan-statuses">{validation.vlanStatuses.map(item => <span className={item.status} key={item.vlan}><i/>VLAN {item.vlan} · {item.status === 'operational' ? 'Operational' : 'Incomplete'}</span>)}</div></section>}
+      {validation.type === 'Trunk' && <section className="inspector-section"><h3>Trunk VLANs</h3><div className="trunk-vlan-detail"><div><span>Configured</span><strong>{validation.configuredVlans.length ? validation.configuredVlans.join(', ') : 'None'}</strong></div><div><span>Operational</span><strong>{validation.operationalVlans.length ? validation.operationalVlans.join(', ') : 'None'}</strong></div></div><div className="trunk-vlan-statuses">{validation.vlanStatuses.map(item => <span className={item.status} key={item.vlan}><i/>VLAN {item.vlan} · {item.status === 'operational' ? 'Operational' : item.status === 'unused' ? 'Not in use' : 'Incomplete'}</span>)}</div></section>}
       {validation.endpoints.some(endpoint => endpoint.interfaceConfig?.address) && <section className="inspector-section"><h3>IP configuration</h3><div className="connection-ip-list">{validation.endpoints.filter(endpoint => endpoint.interfaceConfig?.address).map(endpoint => <div key={endpoint.endpoint.deviceId}><span>{endpoint.device?.customName || endpoint.device?.name}</span><strong>{endpoint.interfaceConfig.address}/{endpoint.interfaceConfig.prefix ?? 24}</strong></div>)}</div></section>}
       {!!validation.problems.length && <section className="inspector-section diagnostics"><h3>What needs attention</h3>{validation.problems.map((problem, index) => <div key={problem}><CircleHelp size={13}/><span><strong>{problem}</strong><small>{validation.corrections[index] || 'Review the connected interface configuration.'}</small></span></div>)}</section>}
       {!validation.problems.length && <section className="inspector-section diagnostics success"><h3>Connection ready</h3><div><ShieldCheck size={14}/><span><strong>No link-level problems detected</strong><small>Security policies and end-to-end routing are still evaluated separately.</small></span></div></section>}
@@ -1146,7 +1510,7 @@ function ConnectionInspector({ connection, validation, width, onWidthChange, onC
   </aside>;
 }
 
-function DeviceInspector({ item, onClose, onInterfaceChange, connectMode, pendingPort, connections, allDevices, ipConflicts, onConnectPort, panel, onPanelChange, onSwitchingChange, onNgfwChange, onRouterChange, onNameChange, width, onWidthChange, cancelToken }) {
+function DeviceInspector({ item, onClose, onInterfaceChange, onGatewayChange, connectMode, pendingPort, connections, allDevices, ipConflicts, onConnectPort, panel, onPanelChange, onSwitchingChange, onNgfwChange, onRouterChange, onNameChange, width, onWidthChange, cancelToken }) {
   const resize = useRef(null);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(item?.customName || item?.name || '');
@@ -1169,8 +1533,9 @@ function DeviceInspector({ item, onClose, onInterfaceChange, connectMode, pendin
 
   function continueResize(event) {
     if (!resize.current) return;
-    const maximum = Math.max(320, Math.min(640, window.innerWidth - 120));
-    onWidthChange(Math.max(260, Math.min(maximum, resize.current.width + resize.current.x - event.clientX)));
+    const uiScale = displayScale();
+    const maximum = Math.max(320, Math.min(640, window.innerWidth / uiScale - 120));
+    onWidthChange(Math.max(260, Math.min(maximum, resize.current.width + (resize.current.x - event.clientX) / uiScale)));
   }
 
   function saveName() {
@@ -1185,9 +1550,8 @@ function DeviceInspector({ item, onClose, onInterfaceChange, connectMode, pendin
       <div><span>Device inspector</span><div className="inspector-device-name">{editingName ? <input autoFocus value={nameDraft} maxLength="48" aria-label="Custom device name" onChange={event => setNameDraft(event.target.value)} onBlur={saveName} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setNameDraft(item.customName || item.name); setEditingName(false); } }}/> : <><strong>{item.customName || item.name}</strong><button className="rename-device" title="Rename device" aria-label="Rename device" onClick={() => setEditingName(true)}><Pencil size={12}/></button></>}</div></div>
       <button className="icon-button" onClick={onClose}><X size={16}/></button>
     </div>
-    {(item.id === 'switch-managed' || item.id === 'firewall-ngfw' || item.id === 'router-advanced') && <div className="inspector-tabs"><button className={panel === 'details' ? 'active' : ''} onClick={() => onPanelChange('details')}>Details</button><button className={panel === 'cli' ? 'active' : ''} onClick={() => onPanelChange('cli')}>Command line</button></div>}
     {!!ipConflicts.length && <div className="device-ip-conflict"><CircleHelp size={14}/><span><strong>Duplicate IP address detected</strong><small>{[...new Set(ipConflicts.map(conflict => conflict.address))].join(', ')} is already used by another device on this local network. Assign a unique address.</small></span></div>}
-    {!definition ? <div className="inspector-empty">Detailed simulation is not available for this device yet.</div> : panel === 'cli' && item.id === 'switch-managed' ? <ManagedSwitchTerminal item={item} onSwitchingChange={onSwitchingChange}/> : panel === 'cli' && item.id === 'firewall-ngfw' ? <NgfwTerminal item={item} onNgfwChange={onNgfwChange}/> : panel === 'cli' && item.id === 'router-advanced' ? <RouterTerminal item={item} onRouterChange={onRouterChange}/> : <>
+    {!definition ? <div className="inspector-empty">Detailed simulation is not available for this device yet.</div> : <>
       <section className="inspector-section">
         <h3>Physical ports <span>{ports.length}</span></h3>
         <div className="port-list">{ports.map(port => {
@@ -1226,6 +1590,11 @@ function DeviceInspector({ item, onClose, onInterfaceChange, connectMode, pendin
             {provisioned && <p>Mask 255.255.255.252 · Default gateway {provisioned.gateway}</p>}
           </div>;
         })}
+        {ports.some(port => ['endpoint', 'endpoint-wireless'].includes(port.kind)) && <div className="gateway-config">
+          <label htmlFor={`gateway-${item.instanceId}`}>Default gateway</label>
+          <input id={`gateway-${item.instanceId}`} aria-label="Default gateway" placeholder="Example: 10.1.10.1" value={item.gateway || ''} onChange={event => onGatewayChange(item.instanceId, event.target.value)}/>
+          <p>Required to reach devices outside this endpoint’s local subnet.</p>
+        </div>}
         {!ports.some(port => ['routed', 'endpoint', 'endpoint-wireless'].includes(port.kind)) && !bridgeIds.length && <p>No configurable IP interfaces.</p>}
       </section>
       <section className="inspector-section">
@@ -1265,11 +1634,19 @@ function loadTerminalState(key, createSession, initialLines) {
 }
 
 function saveTerminalState(key, session, command, lines, history) {
-  try { localStorage.setItem(key, JSON.stringify({ session, command, lines: lines.slice(-500), history: history.slice(-100) })); }
+  // Persist the session and scrollback, but never a draft command. A terminal
+  // may close immediately after `end`/`exit`, before React flushes setCommand,
+  // which would otherwise leave that completion command in the next prompt.
+  try { localStorage.setItem(key, JSON.stringify({ session, command: '', lines: lines.slice(-500), history: history.slice(-100) })); }
   catch { /* Terminal persistence must not interrupt configuration. */ }
 }
 
-function ManagedSwitchTerminal({ item, onSwitchingChange }) {
+function shouldCloseCli(session, entered) {
+  const command = entered.trim().toLowerCase().replace(/\s+/g, ' ');
+  return command === 'end' || (command === 'exit' && ['user', 'privileged'].includes(session.mode));
+}
+
+function ManagedSwitchTerminal({ item, onSwitchingChange, onDone }) {
   const initialLines = ['PacketTracker Managed Switch CLI', 'Type ? to list available commands.'];
   const storageKey = `packettracker-terminal-switch-${item.instanceId}`;
   const initialState = useRef(loadTerminalState(storageKey, createSwitchCliSession, initialLines)).current;
@@ -1308,6 +1685,7 @@ function ManagedSwitchTerminal({ item, onSwitchingChange }) {
     commandHistory.current.push(entered);
     historyIndex.current = commandHistory.current.length;
     setCommand('');
+    if (shouldCloseCli(session, entered)) onDone?.();
   }
 
   function navigateHistory(event) {
@@ -1334,7 +1712,7 @@ function ManagedSwitchTerminal({ item, onSwitchingChange }) {
   </section>;
 }
 
-function NgfwTerminal({ item, onNgfwChange }) {
+function NgfwTerminal({ item, onNgfwChange, onFirewallChange, onDone }) {
   const initialLines = ['PacketTracker NGFW CLI', 'Start with: enable, configure terminal', 'For a trunk: interface inside.10, encapsulation dot1Q 10, then ip address 10.1.10.254/24', 'ASA-style "vlan 10" is also accepted. Type ? for available commands.'];
   const storageKey = `packettracker-terminal-ngfw-${item.instanceId}`;
   const initialState = useRef(loadTerminalState(storageKey, createNgfwCliSession, initialLines)).current;
@@ -1362,11 +1740,13 @@ function NgfwTerminal({ item, onNgfwChange }) {
       setLines([]); setCommand(''); return;
     }
     const prompt = ngfwPrompt(session, item.ngfw);
-    const result = executeNgfwCommand(session, item.ngfw, item.interfaces, entered);
+    const result = executeNgfwCommand(session, item.ngfw, item.interfaces, entered, item.firewall);
     setLines(current => [...current, `${prompt} ${entered}`, ...result.output]);
     setSession(result.session);
     onNgfwChange(item.instanceId, result.config, result.interfaces, result.saved);
+    onFirewallChange(item.instanceId, result.firewall, result.saved);
     commandHistory.current.push(entered); historyIndex.current = commandHistory.current.length; setCommand('');
+    if (shouldCloseCli(session, entered)) onDone?.();
   }
 
   function navigateHistory(event) {
@@ -1382,11 +1762,32 @@ function NgfwTerminal({ item, onNgfwChange }) {
       <label>{ngfwPrompt(session, item.ngfw)}</label>
       <input autoFocus value={command} onChange={event => setCommand(event.target.value)} onKeyDown={navigateHistory} autoComplete="off" spellCheck="false" aria-label="Firewall command" />
     </form>
-    <p className="terminal-help">Trunk example: <code>interface inside.10</code>, <code>encapsulation dot1Q 10</code>, <code>ip address 10.1.10.254/24</code>. ASA-style <code>vlan 10</code> also works. Creation, encapsulation, and addressing are separate steps.</p>
+    <p className="terminal-help">Security policy: <code>policy 10</code>, then set <code>source-zone</code>, <code>destination-zone</code>, <code>protocol</code>, and <code>action</code>. Use <code>show policies</code> to verify order.</p>
   </section>;
 }
 
-function RouterTerminal({ item, onRouterChange }) {
+function FirewallPolicyTerminal({ item, onFirewallChange, onDone }) {
+  const initialLines = ['PacketTracker Firewall CLI', 'Start with: enable, configure terminal', 'Create an ordered rule with: policy 10', 'Type ? for available commands.'];
+  const storageKey = `packettracker-terminal-firewall-${item.instanceId}`;
+  const initialState = useRef(loadTerminalState(storageKey, createFirewallCliSession, initialLines)).current;
+  const [session, setSession] = useState(initialState.session), [command, setCommand] = useState(initialState.command), [lines, setLines] = useState(initialState.lines);
+  const commandHistory = useRef(initialState.history), historyIndex = useRef(initialState.history.length), outputRef = useRef(null);
+  useEffect(() => { const saved = loadTerminalState(storageKey, createFirewallCliSession, initialLines); setSession(saved.session); setCommand(saved.command); setLines(saved.lines); commandHistory.current = saved.history; historyIndex.current = saved.history.length; }, [item.instanceId]);
+  useEffect(() => saveTerminalState(storageKey, session, command, lines, commandHistory.current), [storageKey, session, command, lines]);
+  useEffect(() => { if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight; }, [lines]);
+  function runCommand(event) {
+    event.preventDefault(); const entered = command.trim(); if (!entered) return;
+    if (['clear', 'cls', 'clear screen'].includes(entered.toLowerCase())) { commandHistory.current.push(entered); historyIndex.current = commandHistory.current.length; setLines([]); setCommand(''); return; }
+    const prompt = firewallPrompt(session, item.customName || item.name);
+    const result = executeFirewallCommand(session, item.firewall, entered, item.customName || item.name);
+    setLines(current => [...current, `${prompt} ${entered}`, ...result.output]); setSession(result.session); onFirewallChange(item.instanceId, result.firewall, result.saved);
+    commandHistory.current.push(entered); historyIndex.current = commandHistory.current.length; setCommand(''); if (shouldCloseCli(session, entered)) onDone?.();
+  }
+  function navigateHistory(event) { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); setLines([]); } else if (event.key === 'ArrowUp') { event.preventDefault(); historyIndex.current = Math.max(0, historyIndex.current - 1); setCommand(commandHistory.current[historyIndex.current] || ''); } else if (event.key === 'ArrowDown') { event.preventDefault(); historyIndex.current = Math.min(commandHistory.current.length, historyIndex.current + 1); setCommand(commandHistory.current[historyIndex.current] || ''); } }
+  return <section className="switch-terminal-section"><div className="terminal-status"><span className="terminal-dot"/> Ordered firewall policy configuration <small>{item.startupFirewall ? 'Saved configuration available' : 'Unsaved configuration'}</small></div><div className="switch-terminal" ref={outputRef} aria-live="polite">{lines.map((line, index) => <div key={`${index}-${line}`}>{line || ' '}</div>)}</div><form className="terminal-input" onSubmit={runCommand}><label>{firewallPrompt(session, item.customName || item.name)}</label><input autoFocus value={command} onChange={event => setCommand(event.target.value)} onKeyDown={navigateHistory} autoComplete="off" spellCheck="false" aria-label="Firewall policy command"/></form><p className="terminal-help">Policies use first-match order. Leave gaps such as 10, 20, 30 so another rule can be inserted later. Finish with an explicit catch-all policy, such as <code>policy 10000</code> followed by <code>action deny</code>.</p></section>;
+}
+
+function RouterTerminal({ item, onRouterChange, onDone }) {
   const initialLines = ['PacketTracker Advanced Router CLI', 'Type ? to list available commands.', '802.1Q example: interface gigabitEthernet 0/0.10'];
   const storageKey = `packettracker-terminal-router-${item.instanceId}`;
   const initialState = useRef(loadTerminalState(storageKey, createRouterCliSession, initialLines)).current;
@@ -1415,6 +1816,7 @@ function RouterTerminal({ item, onRouterChange }) {
     setLines(current => [...current, `${prompt} ${entered}`, ...result.output]);
     setSession(result.session); onRouterChange(item.instanceId, result.config, result.interfaces, result.saved);
     commandHistory.current.push(entered); historyIndex.current = commandHistory.current.length; setCommand('');
+    if (shouldCloseCli(session, entered)) onDone?.();
   }
   function navigateHistory(event) {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); setLines([]); return; }
@@ -1494,7 +1896,7 @@ function VlanSubinterfaceEditor({ item, ports, onNgfwChange, onRouterChange }) {
   </section>;
 }
 
-function PlacedDevice({ item, selected, ipConflicts, interactionMode, cancelToken, onConnect, onContextMenu, onSelect, onMove, onDelete }) {
+function PlacedDevice({ item, selected, pingSource, ipConflicts, interactionMode, zoom, cancelToken, onPingTarget, onConnect, onContextMenu, onSelect, onMove, onDelete }) {
   const Icon = item.icon;
   const [dragging, setDragging] = useState(false);
   const offset = useRef({ x: 0, y: 0 });
@@ -1514,21 +1916,26 @@ function PlacedDevice({ item, selected, ipConflicts, interactionMode, cancelToke
       onConnect(item.instanceId);
       return;
     }
+    if (interactionMode === 'ping') {
+      onPingTarget(item.instanceId);
+      return;
+    }
     onSelect(item.instanceId);
     setDragging(true);
     dragOrigin.current = { x: item.x, y: item.y };
-    offset.current = { x: event.clientX - item.x, y: event.clientY - item.y };
+    offset.current = { clientX: event.clientX, clientY: event.clientY, x: item.x, y: item.y };
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
-  return <div className={`placed-device ${selected ? 'selected' : ''} ${dragging ? 'dragging' : ''} ${ipConflicts.length ? 'configuration-error' : ''}`} style={{ left: item.x, top: item.y, '--device-color': item.color }}
+  return <div className={`placed-device ${selected ? 'selected' : ''} ${pingSource ? 'ping-source' : ''} ${dragging ? 'dragging' : ''} ${ipConflicts.length ? 'configuration-error' : ''}`} style={{ left: item.x, top: item.y, '--device-color': item.color }}
     onContextMenu={onContextMenu}
     onPointerDown={pointerDown}
-    onPointerMove={e => { if (dragging) onMove(item.instanceId, Math.max(8, e.clientX - offset.current.x), Math.max(8, e.clientY - offset.current.y)); }}
+    onPointerMove={event => { if (dragging) { const movementScale = displayScale() * (zoom / 100); onMove(item.instanceId, Math.max(-CANVAS_ORIGIN_X + 8, offset.current.x + (event.clientX - offset.current.clientX) / movementScale), Math.max(-CANVAS_ORIGIN_Y + 8, offset.current.y + (event.clientY - offset.current.clientY) / movementScale)); } }}
     onPointerUp={() => { setDragging(false); dragOrigin.current = null; }}>
     {selected && <button className="delete-device" onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onDelete(); }}><Trash2 size={13}/></button>}
     {!!ipConflicts.length && <><span className="device-error-badge" title="Duplicate IP address"><TriangleAlert size={13}/></span><span className="device-error-label">IP conflict: {[...new Set(ipConflicts.map(conflict => conflict.address))].join(', ')}</span></>}
     <div className="placed-icon"><Icon size={29}/><span className="port-light"/></div>
+    {item.assignmentRoleName && <span className="assignment-role-badge">{item.assignmentRoleName}</span>}
     <button className="placed-help" aria-label={`About ${item.customName || item.name}`} onPointerDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
       <CircleHelp size={13}/>
       <span className="placed-tooltip" role="tooltip">
@@ -1542,4 +1949,280 @@ function PlacedDevice({ item, selected, ipConflicts, interactionMode, cancelToke
   </div>;
 }
 
-createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);
+async function api(path, options = {}) {
+  const response = await fetch(path, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
+  const body = response.status === 204 ? null : await response.json().catch(() => null);
+  if (!response.ok) throw new Error(body?.details?.length ? `${body.error}: ${body.details.join(' ')}` : body?.error || `Request failed (${response.status})`);
+  return body;
+}
+
+function PlatformApp() {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [project, setProject] = useState(null);
+  const [dashboardRevision, setDashboardRevision] = useState(0);
+  const [dashboardTab, setDashboardTab] = useState('classes');
+
+  useEffect(() => {
+    api('/api/session').then(async result => {
+      setUser(result.user);
+      if (!result.user) return;
+      let view = null;
+      try { view = JSON.parse(localStorage.getItem(`packettracker-view-${result.user.id}`) || 'null'); } catch { /* use dashboard */ }
+      if (view?.tab) setDashboardTab(view.tab);
+      else setDashboardTab(result.user.role === 'student' ? 'projects' : 'classes');
+      if (view?.page === 'project' && view.projectId) {
+        try { setProject(await api(`/api/projects/${view.projectId}`)); }
+        catch { localStorage.removeItem(`packettracker-view-${result.user.id}`); }
+      }
+    }).catch(() => setUser(null)).finally(() => setLoading(false));
+  }, []);
+
+  async function openProject(id) {
+    const loaded = await api(`/api/projects/${id}`);
+    setProject(loaded);
+    localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'project', projectId: id, tab: 'projects' }));
+  }
+
+  function showDashboardTab(tab) {
+    setDashboardTab(tab);
+    if (user) localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'dashboard', tab }));
+  }
+
+  if (loading) return <div className="platform-loading"><div className="brand-mark"><img src="/packettrackerfavicon.png" alt=""/></div><span>Loading PacketTracker…</span></div>;
+  if (!user) return <AuthScreen onAuthenticated={authenticatedUser => { setDashboardTab(authenticatedUser.role === 'student' ? 'projects' : 'classes'); setUser(authenticatedUser); }}/>;
+  if (project) return <EditorApp key={project.id} project={project} user={user} readOnly={project.owner_id !== user.id} onBack={() => { showDashboardTab('projects'); setProject(null); setDashboardRevision(value => value + 1); }} onSave={project.owner_id === user.id ? async document => {
+    const saved = await api(`/api/projects/${project.id}`, { method: 'PUT', body: JSON.stringify({ name: project.name, document }) });
+    setProject(current => ({ ...current, ...saved }));
+  } : null}/>;
+  return <Dashboard key={dashboardRevision} user={user} initialTab={dashboardTab} onTabChange={showDashboardTab} onOpenProject={openProject} onLogout={async () => { localStorage.removeItem(`packettracker-view-${user.id}`); await api('/api/auth/logout', { method: 'POST' }); setUser(null); }}/>
+}
+
+function AuthScreen({ onAuthenticated }) {
+  const [mode, setMode] = useState('login');
+  const [role, setRole] = useState('student');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault(); setBusy(true); setError('');
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      const result = await api(`/api/auth/${mode}`, { method: 'POST', body: JSON.stringify(mode === 'register' ? { ...values, role } : values) });
+      onAuthenticated(result.user);
+    } catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  }
+
+  return <main className="auth-page">
+    <NetworkConstellationBackground/>
+    <section className="auth-intro"><div className="auth-branding"><img className="auth-logo" src="/packettracker-logo-with-text.png" alt="PacketTracker"/></div><h1>Let’s network</h1><div className="auth-feature"><GraduationCap size={20}/><span><strong>Designed for education</strong><small>Realistic, vendor-neutral network learning</small></span></div></section>
+    <section className="auth-card"><h2>{mode === 'login' ? 'Sign in' : 'Create new account'}</h2>
+      {mode === 'register' && <div className="role-choice"><button className={role === 'student' ? 'active' : ''} onClick={() => setRole('student')}><GraduationCap size={18}/><span><strong>Student</strong><small>Join with a class code</small></span></button><button className={role === 'teacher' ? 'active' : ''} onClick={() => setRole('teacher')}><Users size={18}/><span><strong>Teacher</strong><small>Create and manage classes</small></span></button></div>}
+      <form className="auth-form" onSubmit={submit}>{mode === 'register' && <label>Full name<input name="name" required autoComplete="name"/></label>}<label>Email address<input name="email" type="email" required autoComplete="email"/></label><label>Password<input name="password" type="password" minLength="8" required autoComplete={mode === 'login' ? 'current-password' : 'new-password'}/></label>{mode === 'register' && role === 'student' && <label>Class code<input name="classCode" required maxLength="12" autoCapitalize="characters" placeholder="Example: ABCD234"/></label>}{error && <div className="form-error">{error}</div>}<button className="button primary" disabled={busy}>{busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}</button><button type="button" className="auth-mode-link" onClick={() => { setMode(current => current === 'login' ? 'register' : 'login'); setError(''); }}>{mode === 'login' ? 'Create new account' : 'Already have an account? Sign in'}</button></form>
+    </section>
+  </main>;
+}
+
+function NetworkConstellationBackground() {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const context = canvas.getContext('2d');
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const nodes = [
+      { x: .018, y: .13, color: '#00d8ee', size: 2 }, { x: .072, y: .055, color: '#7c5cff', size: 2 }, { x: .145, y: .11, color: '#00d8ee', size: 4 }, { x: .222, y: .065, color: '#66ee72', size: 3 }, { x: .035, y: .28, color: '#965cff', size: 4 }, { x: .094, y: .35, color: '#00d8ee', size: 4 },
+      { x: .008, y: .68, color: '#00d8ee', size: 2 }, { x: .073, y: .63, color: '#8b5cff', size: 2 }, { x: .027, y: .79, color: '#67ee82', size: 4 }, { x: .156, y: .84, color: '#00d8ee', size: 5 }, { x: .205, y: .93, color: '#00d8ee', size: 2 }, { x: .298, y: .91, color: '#8b5cff', size: 2 },
+      { x: .754, y: .055, color: '#8b5cff', size: 2 }, { x: .817, y: .11, color: '#00d8ee', size: 4 }, { x: .926, y: .035, color: '#68ee76', size: 4 }, { x: .934, y: .25, color: '#8b5cff', size: 3 },
+      { x: .907, y: .61, color: '#00d8ee', size: 5 }, { x: .955, y: .76, color: '#8b5cff', size: 2 }, { x: .835, y: .85, color: '#00d8ee', size: 4 }, { x: .764, y: .95, color: '#00d8ee', size: 2 }, { x: .654, y: .92, color: '#68ee76', size: 4 }, { x: .955, y: .93, color: '#00d8ee', size: 3 }
+    ];
+    const edgePairs = [[0,1],[0,2],[1,2],[1,4],[2,3],[2,4],[2,5],[4,5],[6,7],[6,8],[7,8],[8,9],[9,10],[9,11],[10,11],[12,13],[12,14],[13,14],[13,15],[14,15],[15,17],[16,17],[16,18],[16,21],[17,18],[18,19],[18,21],[19,20],[19,21],[20,21]];
+    const edges = edgePairs.map(([from, to], index) => ({ from, to, color: index % 7 === 0 ? '#8b5cff' : index % 5 === 0 ? '#54e878' : '#00cce4' }));
+    const particles = [], pulses = new Map();
+    let width = 0, height = 0, frame = 0, nextSpawn = performance.now() + 900, lastDraw = 0, hiddenAt = null;
+
+    function resize() {
+      const bounds = canvas.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
+      width = bounds.width; height = bounds.height;
+      canvas.width = Math.max(1, Math.round(width * dpr)); canvas.height = Math.max(1, Math.round(height * dpr));
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      draw(performance.now());
+    }
+    function spawn(now) {
+      const edgeIndex = Math.floor(Math.random() * edges.length), reverse = Math.random() > .5;
+      particles.push({ edgeIndex, reverse, start: now, duration: 2000 + Math.random() * 2000 });
+      nextSpawn = now + 900 + Math.random() * 2500;
+    }
+    function draw(now) {
+      context.clearRect(0, 0, width, height);
+      context.lineWidth = .75;
+      for (const edge of edges) {
+        const a = nodes[edge.from], b = nodes[edge.to];
+        context.strokeStyle = `${edge.color}38`; context.beginPath(); context.moveTo(a.x * width, a.y * height); context.lineTo(b.x * width, b.y * height); context.stroke();
+      }
+      nodes.forEach((node, index) => {
+        const pulseStarted = pulses.get(index), pulseProgress = pulseStarted == null ? 1 : Math.min(1, (now - pulseStarted) / 600);
+        if (pulseProgress >= 1) pulses.delete(index);
+        const pulse = pulseProgress < 1 ? Math.sin(pulseProgress * Math.PI) : 0, radius = node.size + pulse * 2.5;
+        context.save(); context.shadowColor = node.color; context.shadowBlur = 7 + pulse * 10; context.fillStyle = node.color; context.globalAlpha = .72 + pulse * .28; context.beginPath(); context.arc(node.x * width, node.y * height, radius, 0, Math.PI * 2); context.fill(); context.restore();
+      });
+      for (let index = particles.length - 1; index >= 0; index--) {
+        const particle = particles[index], edge = edges[particle.edgeIndex], raw = (now - particle.start) / particle.duration;
+        if (raw >= 1) { pulses.set(particle.reverse ? edge.from : edge.to, now); particles.splice(index, 1); continue; }
+        const progress = particle.reverse ? 1 - raw : raw, a = nodes[edge.from], b = nodes[edge.to], fade = Math.min(1, raw * 7, (1 - raw) * 7);
+        context.save(); context.globalAlpha = fade; context.shadowColor = '#d7ffff'; context.shadowBlur = 8; context.fillStyle = '#c9ffff'; context.beginPath(); context.arc((a.x + (b.x - a.x) * progress) * width, (a.y + (b.y - a.y) * progress) * height, 1.7, 0, Math.PI * 2); context.fill(); context.restore();
+      }
+    }
+    function animate(now) {
+      if (!document.hidden) {
+        if (now >= nextSpawn && particles.length < 3) spawn(now);
+        if (now - lastDraw >= 32) { draw(now); lastDraw = now; }
+      } else nextSpawn = now + 1000;
+      frame = requestAnimationFrame(animate);
+    }
+    function handleVisibility() {
+      if (document.hidden) hiddenAt = performance.now();
+      else if (hiddenAt != null) {
+        const pausedFor = performance.now() - hiddenAt;
+        particles.forEach(particle => { particle.start += pausedFor; });
+        nextSpawn += pausedFor; hiddenAt = null;
+      }
+    }
+    const observer = new ResizeObserver(resize); observer.observe(canvas); resize();
+    document.addEventListener('visibilitychange', handleVisibility);
+    if (!reduceMotion) frame = requestAnimationFrame(animate);
+    return () => { observer.disconnect(); document.removeEventListener('visibilitychange', handleVisibility); cancelAnimationFrame(frame); };
+  }, []);
+
+  return <canvas ref={canvasRef} className="network-constellation" aria-hidden="true"/>;
+}
+
+function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, onLogout }) {
+  const [data, setData] = useState({ classes: [], projects: [], sharedProjects: [], assignments: [] });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [newClass, setNewClass] = useState('');
+  const [joinCodeValue, setJoinCodeValue] = useState('');
+  const [newProject, setNewProject] = useState('');
+  const [teacherTab, setTeacherTab] = useState(initialTab);
+  const [classModalOpen, setClassModalOpen] = useState(false);
+  const classNameRef = useRef(null);
+  const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const projectNameRef = useRef(null);
+  const [presentedJoinCode, setPresentedJoinCode] = useState(null);
+  const [assignmentModalOpen, setAssignmentModalOpen] = useState(false);
+  const [assignmentJson, setAssignmentJson] = useState('');
+  const [assignmentClassTarget, setAssignmentClassTarget] = useState(null);
+  const [selectedAssignmentClasses, setSelectedAssignmentClasses] = useState([]);
+  const [assignmentPromptCopied, setAssignmentPromptCopied] = useState(false);
+
+  const refresh = () => api('/api/dashboard').then(setData).catch(requestError => setError(requestError.message)).finally(() => setLoading(false));
+  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    if (!classModalOpen) return undefined;
+    const frame = requestAnimationFrame(() => classNameRef.current?.focus());
+    const closeOnEscape = event => { if (event.key === 'Escape') setClassModalOpen(false); };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', closeOnEscape); };
+  }, [classModalOpen]);
+  useEffect(() => {
+    if (!projectModalOpen) return undefined;
+    const frame = requestAnimationFrame(() => projectNameRef.current?.focus());
+    const closeOnEscape = event => { if (event.key === 'Escape') setProjectModalOpen(false); };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', closeOnEscape); };
+  }, [projectModalOpen]);
+  useEffect(() => {
+    if (!presentedJoinCode) return undefined;
+    const closeOnEscape = event => { if (event.key === 'Escape') setPresentedJoinCode(null); };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [presentedJoinCode]);
+  async function createClass(event) { event.preventDefault(); await api('/api/classes', { method: 'POST', body: JSON.stringify({ name: newClass }) }); setNewClass(''); setClassModalOpen(false); refresh(); }
+  async function joinClass(event) { event.preventDefault(); await api('/api/classes/join', { method: 'POST', body: JSON.stringify({ code: joinCodeValue }) }); setJoinCodeValue(''); refresh(); }
+  async function createProject(event) { event.preventDefault(); const created = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name: newProject || 'Untitled Network' }) }); setProjectModalOpen(false); onOpenProject(created.id); }
+  async function removeProject(id) { await api(`/api/projects/${id}`, { method: 'DELETE' }); refresh(); }
+  async function shareProject(projectId, classId) { await api(`/api/projects/${projectId}/share`, { method: 'POST', body: JSON.stringify({ classId }) }); refresh(); }
+  async function manageJoinCode(classId, action) {
+    try {
+      await api(`/api/classes/${classId}/join-code`, { method: 'PATCH', body: JSON.stringify({ action }) });
+      setPresentedJoinCode(null); refresh();
+    } catch (requestError) { setError(requestError.message); }
+  }
+  async function importAssignment(event) {
+    event.preventDefault(); setError('');
+    try {
+      const specification = JSON.parse(assignmentJson);
+      await api('/api/assignments', { method: 'POST', body: JSON.stringify({ specification }) });
+      setAssignmentJson(''); setAssignmentModalOpen(false); refresh();
+    } catch (requestError) { setError(requestError instanceof SyntaxError ? `Invalid JSON: ${requestError.message}` : requestError.message); }
+  }
+  async function startAssignment(assignment) {
+    if (assignment.project_id) return onOpenProject(assignment.project_id);
+    const project = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name: assignment.title, assignmentId: assignment.id }) });
+    onOpenProject(project.id);
+  }
+  async function assignToClasses(event) {
+    event.preventDefault();
+    try {
+      await api(`/api/assignments/${assignmentClassTarget.id}/classes`, { method: 'PUT', body: JSON.stringify({ classIds: selectedAssignmentClasses }) });
+      setAssignmentClassTarget(null); refresh();
+    } catch (requestError) { setError(requestError.message); }
+  }
+
+  const classesPanel = <section className="dashboard-panel classes-panel"><div className="dashboard-panel-title"><div><Users size={18}/><span><strong>{user.role === 'teacher' ? 'Classes' : 'My class'}</strong><small>{user.role === 'teacher' ? `${data.classes.length} owned` : data.classes.length ? 'Your enrolled class' : 'Not enrolled yet'}</small></span></div>{user.role === 'teacher' && <button className="panel-add-button" onClick={() => setClassModalOpen(true)} aria-label="Create a class" title="Create a class"><Plus size={23}/></button>}</div>
+    {user.role === 'student' && data.classes.length === 0 && <form className="inline-create" onSubmit={joinClass}><input required value={joinCodeValue} onChange={event => setJoinCodeValue(event.target.value)} placeholder="Enter class code"/><button className="button primary">Join</button></form>}
+    <div className="class-list">{data.classes.map(course => <article key={course.id}><div><strong>{course.name}</strong><small>{user.role === 'teacher' ? `${course.student_count} students` : `Teacher: ${course.teacher_name}`}</small></div>{user.role === 'teacher' && <div className="class-code-controls">{course.join_code_active ? <><button className="join-code-button" onClick={() => setPresentedJoinCode({ code: course.join_code, className: course.name })} title="Display join code"><code>{course.join_code}</code></button><button onClick={() => manageJoinCode(course.id, 'regenerate')} title="Generate a different join code"><RotateCcw size={14}/>Change</button><button className="disable-code" onClick={() => manageJoinCode(course.id, 'disable')} title="Stop students from using this code"><X size={14}/>Disable</button></> : <><span>Join code disabled</span><button onClick={() => manageJoinCode(course.id, 'regenerate')}><RotateCcw size={14}/>Create code</button></>}</div>}</article>)}{!data.classes.length && <p>No classes yet.</p>}</div>
+  </section>;
+  const projectsPanel = <section className="dashboard-panel projects-panel"><div className="dashboard-panel-title"><div><FolderOpen size={18}/><span><strong>My projects</strong><small>{data.projects.length} saved projects</small></span></div><button className="panel-add-button" onClick={() => setProjectModalOpen(true)} aria-label="Create a project" title="Create a project"><Plus size={23}/></button></div>
+    <div className="project-list">{data.projects.map(item => <article key={item.id}><button className="project-open" onClick={() => onOpenProject(item.id)}><span className="project-icon"><Network size={18}/></span><span><strong>{item.name}</strong><small>Updated {new Date(item.updated_at).toLocaleString()}</small></span></button><div>{user.role === 'student' && data.classes.length > 0 && <button title="Share with teacher" onClick={() => shareProject(item.id, data.classes[0].id)}><Share2 size={14}/>{item.shared ? 'Shared' : 'Share'}</button>}<button className="danger-link" onClick={() => removeProject(item.id)}><Trash2 size={14}/></button></div></article>)}{!data.projects.length && <p>Create your first network project.</p>}</div>
+  </section>;
+  const sharedPanel = <section className="dashboard-panel shared-panel"><div className="dashboard-panel-title"><div><Share2 size={18}/><span><strong>Shared with me</strong><small>Student projects for review</small></span></div></div><div className="project-list">{data.sharedProjects.map(item => <article key={item.id}><button className="project-open" onClick={() => onOpenProject(item.id)}><span className="project-icon"><Network size={18}/></span><span><strong>{item.name}</strong><small>{item.owner_name}{item.class_name ? ` · ${item.class_name}` : ''}</small></span></button></article>)}{!data.sharedProjects.length && <p>No student projects have been shared yet.</p>}</div></section>;
+  const assignmentsPanel = <section className="dashboard-panel assignments-panel"><div className="dashboard-panel-title"><div><FilePlus2 size={18}/><span><strong>Assignments</strong><small>{data.assignments.length} available</small></span></div>{user.role === 'teacher' && <button className="panel-add-button" onClick={() => setAssignmentModalOpen(true)} aria-label="Create assignment" title="Create assignment from JSON"><Plus size={23}/></button>}</div>
+    <div className="assignment-list">{data.assignments.map(assignment => <article key={assignment.id}><div><span>{assignment.classNames?.length ? assignment.classNames.join(' · ') : user.role === 'teacher' ? 'Not assigned' : 'Assignment'}</span><strong>{assignment.title}</strong><p>{assignmentDescription(assignment.specification.scenario.description)}</p><small>{assignment.specification.roles.length} roles · {assignment.specification.relationships.length} reachability checks</small></div>{user.role === 'student' ? <button className="button primary" onClick={() => startAssignment(assignment)}>{assignment.project_id ? 'Open project' : 'Start assignment'}</button> : <div className="assignment-actions"><button className="button secondary" onClick={() => startAssignment(assignment)}>{assignment.project_id ? 'Open preview' : 'Test assignment'}</button><button className="button primary" onClick={() => { setAssignmentClassTarget(assignment); setSelectedAssignmentClasses(assignment.classIds || []); }}>Assign to classes</button><small>{assignment.student_projects} student project{assignment.student_projects === 1 ? '' : 's'}</small></div>}</article>)}{!data.assignments.length && <p>{user.role === 'teacher' ? 'Create an assignment from JSON, test it privately, then assign it to one or more classes.' : 'Your teacher has not published any assignments yet.'}</p>}</div>
+  </section>;
+  const dashboardPanels = { classes: classesPanel, projects: projectsPanel, shared: sharedPanel, assignments: assignmentsPanel };
+  const selectDashboardTab = tab => { setTeacherTab(tab); onTabChange?.(tab); };
+
+  return <div className={`dashboard-shell ${user.role === 'teacher' ? 'teacher-dashboard' : 'student-dashboard'}`}><NetworkConstellationBackground/><header className="dashboard-topbar"><div className="brand"><div className="brand-mark"><img src="/packettrackerfavicon.png" alt=""/></div><span>Packet<span>Tracker</span></span></div><div><span>{user.name}</span><small>{user.role}</small><button className="icon-button" title="Sign out" onClick={onLogout}><LogOut size={17}/></button></div></header>
+    <main className="dashboard-main"><section className="dashboard-welcome"><h1>{user.role === 'teacher' ? 'Teacher Dashboard' : 'Student Dashboard'}</h1></section>
+      {error && <div className="form-error">{error}</div>}{loading ? <div className="dashboard-loading">Loading your workspace…</div> : <div className="teacher-workspace">
+        <nav className="teacher-tabs" aria-label={`${user.role === 'teacher' ? 'Teacher' : 'Student'} workspace sections`}>
+          {user.role === 'student' && <button className={teacherTab === 'projects' ? 'active' : ''} onClick={() => selectDashboardTab('projects')}><FolderOpen size={18}/><span>Projects</span><small>{data.projects.length}</small></button>}
+          {user.role === 'student' && <button className={teacherTab === 'assignments' ? 'active' : ''} onClick={() => selectDashboardTab('assignments')}><FilePlus2 size={18}/><span>Assignments</span><small>{data.assignments.length}</small></button>}
+          <button className={teacherTab === 'classes' ? 'active' : ''} onClick={() => selectDashboardTab('classes')}><Users size={18}/><span>{user.role === 'teacher' ? 'Classes' : 'Class Info'}</span><small>{data.classes.length}</small></button>
+          {user.role === 'teacher' && <button className={teacherTab === 'projects' ? 'active' : ''} onClick={() => selectDashboardTab('projects')}><FolderOpen size={18}/><span>Projects</span><small>{data.projects.length}</small></button>}
+          {user.role === 'teacher' && <button className={teacherTab === 'assignments' ? 'active' : ''} onClick={() => selectDashboardTab('assignments')}><FilePlus2 size={18}/><span>Assignments</span><small>{data.assignments.length}</small></button>}
+          {user.role === 'teacher' && <button className={teacherTab === 'shared' ? 'active' : ''} onClick={() => selectDashboardTab('shared')}><Share2 size={18}/><span>Shared with me</span><small>{data.sharedProjects.length}</small></button>}
+        </nav>
+        <div className="teacher-tab-content">{dashboardPanels[teacherTab === 'shared' && user.role !== 'teacher' ? 'classes' : teacherTab]}</div>
+      </div>}
+    </main>
+    {classModalOpen && <div className="class-modal-backdrop" onPointerDown={() => setClassModalOpen(false)}>
+      <section className="class-create-modal" role="dialog" aria-modal="true" aria-labelledby="class-create-title" onPointerDown={event => event.stopPropagation()}>
+        <header><div><span>New class</span><h2 id="class-create-title">Create a class</h2></div><button className="icon-button" onClick={() => setClassModalOpen(false)} aria-label="Close"><X size={17}/></button></header>
+        <form onSubmit={createClass}><label htmlFor="new-class-name">Class name</label><input ref={classNameRef} id="new-class-name" required value={newClass} onChange={event => setNewClass(event.target.value)} placeholder="Example: Network Fundamentals"/><div><button type="button" className="button secondary" onClick={() => setClassModalOpen(false)}>Cancel</button><button className="button primary">Create</button></div></form>
+      </section>
+    </div>}
+    {projectModalOpen && <div className="class-modal-backdrop" onPointerDown={() => setProjectModalOpen(false)}>
+      <section className="class-create-modal" role="dialog" aria-modal="true" aria-labelledby="project-create-title" onPointerDown={event => event.stopPropagation()}>
+        <header><div><span>New project</span><h2 id="project-create-title">Create a project</h2></div><button className="icon-button" onClick={() => setProjectModalOpen(false)} aria-label="Close"><X size={17}/></button></header>
+        <form onSubmit={createProject}><label htmlFor="new-project-name">Project name</label><input ref={projectNameRef} id="new-project-name" required value={newProject} onChange={event => setNewProject(event.target.value)} placeholder="Example: Branch Office Network"/><div><button type="button" className="button secondary" onClick={() => setProjectModalOpen(false)}>Cancel</button><button className="button primary">Create</button></div></form>
+      </section>
+    </div>}
+    {assignmentModalOpen && <div className="class-modal-backdrop" onPointerDown={() => setAssignmentModalOpen(false)}>
+      <section className="class-create-modal assignment-import-modal" role="dialog" aria-modal="true" aria-labelledby="assignment-import-title" onPointerDown={event => event.stopPropagation()}>
+        <header><div><span>Assignment JSON</span><h2 id="assignment-import-title">Create assignment</h2></div><div className="assignment-modal-tools"><button className="copy-prompt-button" onClick={async () => { await navigator.clipboard.writeText(ASSIGNMENT_AI_PROMPT); setAssignmentPromptCopied(true); setTimeout(() => setAssignmentPromptCopied(false), 1800); }} title="Copy the AI assignment interview prompt" aria-label="Copy AI prompt"><Copy size={17}/></button><button className="icon-button" onClick={() => setAssignmentModalOpen(false)} aria-label="Close"><X size={17}/></button></div></header>
+        {assignmentPromptCopied && <div className="prompt-copied">AI interview prompt copied</div>}<form onSubmit={importAssignment}><p className="assignment-import-help">Use the copy button above with an AI assistant, then paste the JSON it gives you below. Creating an assignment does not publish it to students.</p><label htmlFor="assignment-json">Paste assignment JSON</label><textarea id="assignment-json" autoFocus required value={assignmentJson} onChange={event => setAssignmentJson(event.target.value)} placeholder="Paste the JSON from your AI assistant here"/><div><button type="button" className="button secondary" onClick={() => setAssignmentModalOpen(false)}>Cancel</button><button className="button primary">Create assignment</button></div></form>
+      </section>
+    </div>}
+    {assignmentClassTarget && <div className="class-modal-backdrop" onPointerDown={() => setAssignmentClassTarget(null)}><section className="class-create-modal assignment-class-modal" role="dialog" aria-modal="true" aria-labelledby="assignment-class-title" onPointerDown={event => event.stopPropagation()}><header><div><span>Publish assignment</span><h2 id="assignment-class-title">Assign “{assignmentClassTarget.title}”</h2></div><button className="icon-button" onClick={() => setAssignmentClassTarget(null)}><X size={17}/></button></header><form onSubmit={assignToClasses}><p>Select every class that should receive this assignment. Clearing all selections returns it to private draft status.</p><div className="assignment-class-options">{data.classes.map(course => <label key={course.id}><input type="checkbox" checked={selectedAssignmentClasses.includes(course.id)} onChange={event => setSelectedAssignmentClasses(current => event.target.checked ? [...current, course.id] : current.filter(id => id !== course.id))}/><span><strong>{course.name}</strong><small>{course.student_count} students</small></span></label>)}{!data.classes.length && <p>Create a class before publishing assignments.</p>}</div><div><button type="button" className="button secondary" onClick={() => setAssignmentClassTarget(null)}>Cancel</button><button className="button primary">Save class assignments</button></div></form></section></div>}
+    {presentedJoinCode && <div className="join-code-presentation" role="dialog" aria-modal="true" aria-labelledby="join-code-title">
+      <div className="join-code-display"><span id="join-code-title">Join {presentedJoinCode.className}</span><strong>{presentedJoinCode.code}</strong><button onClick={() => setPresentedJoinCode(null)}>Close</button></div>
+    </div>}
+  </div>;
+}
+
+createRoot(document.getElementById('root')).render(<React.StrictMode><PlatformApp /></React.StrictMode>);

@@ -1,3 +1,5 @@
+import { contextHelp, isHelpRequest } from './cliHelp.js';
+
 const clone = value => structuredClone(value);
 
 export function createSwitchCliSession() {
@@ -22,7 +24,7 @@ export function executeSwitchCommand(session, currentSwitching, rawCommand) {
   let saved = false;
 
   if (!command) return { session: nextSession, switching, output, saved };
-  if (lower === '?' || lower === 'help') return { session: nextSession, switching, output: helpForMode(session.mode), saved };
+  if (isHelpRequest(command)) return { session: nextSession, switching, output: contextHelp(helpForMode(session.mode), command), saved };
   if (lower === 'end') return { session: { mode: 'privileged', vlanId: null, interfaceId: null }, switching, output, saved };
   if (lower === 'exit') {
     if (['vlan', 'interface'].includes(session.mode)) return { session: { mode: 'config', vlanId: null, interfaceId: null }, switching, output, saved };
@@ -42,7 +44,7 @@ export function executeSwitchCommand(session, currentSwitching, rawCommand) {
     else if (lower === 'show vlan' || lower === 'show vlan brief') output = showVlans(switching);
     else if (lower === 'show interfaces' || lower === 'show interfaces status') output = showInterfaces(switching);
     else if (lower === 'show running-config' || lower === 'show run') output = runningConfig(switching);
-    else if (lower === 'write memory' || lower === 'copy running-config startup-config') { output = ['Configuration saved.']; saved = true; }
+    else if (lower === 'write memory' || lower === 'copy running-config startup-config') saved = true;
     else output = [`% Unknown command: ${command}`, 'Type ? for available commands.'];
     return { session: nextSession, switching, output, saved };
   }
@@ -84,11 +86,11 @@ export function executeSwitchCommand(session, currentSwitching, rawCommand) {
     const description = command.match(/^description\s+(.{1,64})$/i);
     const allowedVlans = command.match(/^switchport\s+trunk\s+allowed\s+vlan\s+([\d, -]+)$/i);
     const encapsulationWithVlan = command.match(/^(?:switchport trunk )?encapsulation\s+dot1q\s+(\d+)$/i);
-    if (lower === 'switchport mode access') { port.mode = 'access'; output = [`Access mode selected. Untagged traffic will use VLAN ${port.accessVlan}.`]; }
-    else if (lower === 'switchport trunk encapsulation dot1q' || lower === 'encapsulation dot1q') { port.encapsulation = 'dot1q'; output = ['802.1Q trunk encapsulation selected.']; }
+    if (lower === 'switchport mode access') port.mode = 'access';
+    else if (lower === 'switchport trunk encapsulation dot1q' || lower === 'encapsulation dot1q') port.encapsulation = 'dot1q';
     else if (encapsulationWithVlan) output = ['% Switch trunk encapsulation does not take a VLAN ID.', 'Use "switchport trunk encapsulation dot1q", then "switchport trunk allowed vlan <list>".'];
-    else if (lower === 'no switchport trunk encapsulation' || lower === 'no encapsulation dot1q') { delete port.encapsulation; output = ['Explicit encapsulation removed. This switch still uses 802.1Q for trunk ports.']; }
-    else if (lower === 'switchport mode trunk') { port.mode = 'trunk'; port.encapsulation ||= 'dot1q'; port.allowedVlans ||= []; output = ['Trunk mode selected. Configure the allowed VLAN list on this port.']; }
+    else if (lower === 'no switchport trunk encapsulation' || lower === 'no encapsulation dot1q') delete port.encapsulation;
+    else if (lower === 'switchport mode trunk') { port.mode = 'trunk'; port.encapsulation ||= 'dot1q'; port.allowedVlans ||= []; }
     else if (allowedVlans) {
       const ids = parseVlanList(allowedVlans[1]);
       const missing = ids.find(id => !switching.vlans[id]);
@@ -111,11 +113,11 @@ export function executeSwitchCommand(session, currentSwitching, rawCommand) {
 }
 
 function helpForMode(mode) {
-  if (mode === 'user') return ['enable                         Enter privileged mode', '?                              Show available commands'];
-  if (mode === 'privileged') return ['configure terminal             Enter configuration mode', 'show vlan brief                List VLANs and access ports', 'show interfaces status         List port status and VLANs', 'show running-config            Display active configuration', 'write memory                   Save the active configuration', 'disable                        Return to user mode'];
-  if (mode === 'config') return ['hostname <name>                Set the switch hostname', 'vlan <1-4094>                  Create or edit a VLAN', 'no vlan <1-4094>               Remove an unused VLAN', 'interface ethernet <1-8>       Configure a physical port', 'end                            Return to privileged mode'];
-  if (mode === 'vlan') return ['name <name>                    Name the selected VLAN', 'exit                           Return to global configuration', 'end                            Return to privileged mode'];
-  return ['switchport mode access         Configure an access port', 'switchport access vlan <id>    Assign the access VLAN', 'switchport trunk encapsulation dot1q', 'switchport mode trunk          Carry 802.1Q tagged VLANs', 'switchport trunk allowed vlan <list>', 'description <text>             Describe the port', 'shutdown                       Disable the port', 'no shutdown                    Enable the port', 'exit                           Return to global configuration'];
+  if (mode === 'user') return ['enable                         Enter privileged mode'];
+  if (mode === 'privileged') return ['configure terminal             Enter global configuration mode', 'disable                        Return to user mode', 'exit                           Close the command-line session', 'show interfaces status         List port status and VLAN membership', 'show running-config            Display the active configuration', 'show vlan brief                List VLANs and access ports', 'write memory                   Save the active configuration'];
+  if (mode === 'config') return ['end                            Return to privileged mode', 'exit                           Return to privileged mode', 'hostname <name>                Set the switch hostname', 'interface ethernet <1-8>       Select a physical port', 'no vlan <1-4094>               Remove an unused VLAN', 'vlan <1-4094>                  Create or edit a VLAN'];
+  if (mode === 'vlan') return ['end                            Return to privileged mode', 'exit                           Return to global configuration mode', 'name <name>                    Name the selected VLAN'];
+  return ['description <text>             Describe the port', 'end                            Return to privileged mode', 'exit                           Return to global configuration mode', 'no description                 Remove the port description', 'no shutdown                    Enable the port', 'no switchport trunk encapsulation  Remove explicit trunk encapsulation', 'shutdown                       Disable the port', 'switchport access vlan <id>    Assign the access VLAN', 'switchport mode access         Configure an access port', 'switchport mode trunk          Carry 802.1Q tagged VLANs', 'switchport trunk allowed vlan <list>  Set the VLANs allowed on the trunk', 'switchport trunk encapsulation dot1q  Use IEEE 802.1Q tagging'];
 }
 
 function showVlans(switching) {

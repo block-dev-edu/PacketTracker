@@ -1,7 +1,10 @@
+import { executeFirewallCommand, firewallHelp, normalizeFirewall } from './firewallPolicyCli.js';
+import { contextHelp, isHelpRequest } from './cliHelp.js';
+
 const clone = value => structuredClone(value);
 
 export function createNgfwCliSession() {
-  return { mode: 'user', interfaceId: null };
+  return { mode: 'user', interfaceId: null, policySequence: null };
 }
 
 export function ngfwPrompt(session, config) {
@@ -9,25 +12,36 @@ export function ngfwPrompt(session, config) {
   if (session.mode === 'user') return `${hostname}>`;
   if (session.mode === 'privileged') return `${hostname}#`;
   if (session.mode === 'config') return `${hostname}(config)#`;
+  if (session.mode === 'policy') return `${hostname}(config-policy-${session.policySequence})#`;
   return `${hostname}(config-if-${session.interfaceId})#`;
 }
 
-export function executeNgfwCommand(session, currentConfig, currentInterfaces, rawCommand) {
+export function executeNgfwCommand(session, currentConfig, currentInterfaces, rawCommand, currentFirewall = null) {
   const command = rawCommand.trim();
   const lower = command.toLowerCase().replace(/\s+/g, ' ');
   const nextSession = { ...session };
   const config = clone(currentConfig);
   const interfaces = clone(currentInterfaces || {});
+  const firewall = normalizeFirewall(currentFirewall, 'stateful');
   let output = [];
   let saved = false;
 
-  if (!command) return { session: nextSession, config, interfaces, output, saved };
-  if (lower === '?' || lower === 'help') return { session: nextSession, config, interfaces, output: help(session.mode), saved };
-  if (lower === 'end') return { session: { mode: 'privileged', interfaceId: null }, config, interfaces, output, saved };
+  if (!command) return { session: nextSession, config, interfaces, firewall, output, saved };
+  if (isHelpRequest(command)) return { session: nextSession, config, interfaces, firewall, output: contextHelp(session.mode === 'policy' ? firewallHelp('policy') : help(session, config), command), saved };
+  if (lower === 'end') return { session: { mode: 'privileged', interfaceId: null, policySequence: null }, config, interfaces, firewall, output, saved };
   if (lower === 'exit') {
-    if (session.mode === 'interface') return { session: { mode: 'config', interfaceId: null }, config, interfaces, output, saved };
-    if (session.mode === 'config') return { session: { mode: 'privileged', interfaceId: null }, config, interfaces, output, saved };
-    if (session.mode === 'privileged') return { session: { mode: 'user', interfaceId: null }, config, interfaces, output, saved };
+    if (session.mode === 'policy') return { session: { mode: 'config', interfaceId: null, policySequence: null }, config, interfaces, firewall, output, saved };
+    if (session.mode === 'interface') return { session: { mode: 'config', interfaceId: null, policySequence: null }, config, interfaces, firewall, output, saved };
+    if (session.mode === 'config') return { session: { mode: 'privileged', interfaceId: null, policySequence: null }, config, interfaces, firewall, output, saved };
+    if (session.mode === 'privileged') return { session: { mode: 'user', interfaceId: null, policySequence: null }, config, interfaces, firewall, output, saved };
+  }
+
+  const policyCommand = session.mode === 'policy'
+    || (session.mode === 'privileged' && (/^show polic(?:y|ies)/.test(lower)))
+    || (session.mode === 'config' && (/^(policy |no policy |resequence policies )/.test(lower) || lower === 'show policies'));
+  if (policyCommand) {
+    const result = executeFirewallCommand(session, firewall, command, config.hostname || 'NGFW');
+    return { ...result, config, interfaces };
   }
 
   if (session.mode === 'user') {
@@ -38,11 +52,11 @@ export function executeNgfwCommand(session, currentConfig, currentInterfaces, ra
     else if (lower === 'show interfaces') output = showInterfaces(config, interfaces);
     else if (lower === 'show vlans' || lower === 'show vlan') output = showVlans(config, interfaces);
     else if (lower === 'show running-config' || lower === 'show run') output = runningConfig(config, interfaces);
-    else if (lower === 'write memory' || lower === 'copy running-config startup-config') { output = ['Configuration saved.']; saved = true; }
+    else if (lower === 'write memory' || lower === 'copy running-config startup-config') saved = true;
     else output = [`% Unknown command: ${command}`, 'Type ? for available commands.'];
   } else if (session.mode === 'config') {
     const hostname = command.match(/^hostname\s+([a-z0-9][a-z0-9-]{0,31})$/i);
-    const iface = command.match(/^interface\s+(outside|inside|dmz|optional)(?:\.(\d{1,4}))?$/i) || parsePortInterface(command);
+    const iface = command.match(/^interface\s+(outside|inside|dmz|optional)(?:\.(\d{1,4}))?$/i);
     const noIface = command.match(/^no\s+interface\s+(outside|inside|dmz|optional)\.(\d{1,4})$/i);
     if (hostname) config.hostname = hostname[1];
     else if (iface) {
@@ -66,8 +80,11 @@ export function executeNgfwCommand(session, currentConfig, currentInterfaces, ra
     const zone = command.match(/^zone\s+([a-z0-9_-]{1,24})$/i);
     const allowed = command.match(/^trunk\s+allowed\s+vlan\s+([\d, -]+)$/i);
     const vlan = command.match(/^vlan\s+(\d{1,4})$/i) || command.match(/^encapsulation\s+dot1q\s+(\d{1,4})$/i);
-    const addVlan = command.match(/^add\s+vlan\s+(\d{1,4})\s+ip\s+(\d{1,3}(?:\.\d{1,3}){3})\/(\d|[12]\d|3[0-2])\s+zone\s+([a-z0-9_-]{1,24})$/i);
-    const removeVlan = command.match(/^remove\s+vlan\s+(\d{1,4})$/i);
+    // Reserved for a possible future beginner mode. The one-line `add vlan`
+    // shortcut intentionally remains disabled so learners configure the
+    // subinterface, VLAN encapsulation, address, and zone explicitly.
+    // const addVlan = command.match(/^add\s+vlan\s+(\d{1,4})\s+ip\s+(\d{1,3}(?:\.\d{1,3}){3})\/(\d|[12]\d|3[0-2])\s+zone\s+([a-z0-9_-]{1,24})$/i);
+    // const removeVlan = command.match(/^remove\s+vlan\s+(\d{1,4})$/i);
     if (vlan && target && !physical) {
       const vlanId = Number(vlan[1]);
       if (vlanId < 1 || vlanId > 4094) output = ['% VLAN ID must be between 1 and 4094.'];
@@ -76,46 +93,32 @@ export function executeNgfwCommand(session, currentConfig, currentInterfaces, ra
     } else if ((lower === 'no vlan' || lower === 'no encapsulation dot1q') && target && !physical) {
       const previous = target.vlanId; target.vlanId = null;
       if (previous) config.ports[target.parent].allowedVlans = config.ports[target.parent].allowedVlans.filter(value => value !== previous);
-    } else if (addVlan && physical) {
-      const vlanId = Number(addVlan[1]);
-      if (physical.mode !== 'trunk') output = ['% Select trunk mode first with "mode trunk".'];
-      else if (vlanId < 1 || vlanId > 4094) output = ['% VLAN ID must be between 1 and 4094.'];
-      else {
-        const subId = `${id}.${vlanId}`;
-        config.subinterfaces[subId] = { parent: id, unit: vlanId, vlanId, zone: addVlan[4], enabled: true };
-        interfaces[subId] = { address: addVlan[2], prefix: Number(addVlan[3]) };
-        if (!physical.allowedVlans.includes(vlanId)) physical.allowedVlans.push(vlanId);
-        physical.allowedVlans.sort((a, b) => a - b);
-        output = [`VLAN ${vlanId} added on ${id}.`, `Gateway ${addVlan[2]}/${addVlan[3]} | Zone ${addVlan[4]}`];
-      }
-    } else if (removeVlan && physical) {
-      const vlanId = Number(removeVlan[1]);
-      const subId = `${id}.${vlanId}`;
-      if (!config.subinterfaces[subId]) output = [`% VLAN ${vlanId} is not configured on ${id}.`];
-      else { delete config.subinterfaces[subId]; delete interfaces[subId]; physical.allowedVlans = physical.allowedVlans.filter(value => value !== vlanId); output = [`VLAN ${vlanId} removed from ${id}.`]; }
-    } else if (ip && physical?.mode === 'trunk') output = ['% A trunk uses VLAN subinterfaces. Use "add vlan <id> ip <address>/<prefix> zone <zone>".'];
+    /* Future beginner-mode shortcut implementation belongs here. */
+    } else if (ip && physical?.mode === 'trunk') output = ['% A trunk uses VLAN subinterfaces.', `Create one with "interface ${id}.<vlan>", then configure its VLAN, IP address, and zone.`];
     else if (ip) interfaces[id] = { address: ip[1], prefix: Number(ip[2]) };
     else if (lower === 'no ip address') delete interfaces[id];
     else if (zone) target.zone = zone[1];
     else if (lower === 'mode routed' && physical) {
       physical.mode = 'routed'; physical.allowedVlans = [];
       for (const [subId, sub] of Object.entries(config.subinterfaces)) if (sub.parent === id) { delete config.subinterfaces[subId]; delete interfaces[subId]; }
-      output = ['Routed mode selected.', 'Next: ip address <address>/<prefix>'];
     }
-    else if (lower === 'mode trunk' && physical) { physical.mode = 'trunk'; output = ['Trunk mode selected.', 'Next: add vlan <id> ip <gateway>/<prefix> zone <zone>']; }
+    else if (lower === 'mode trunk' && physical) physical.mode = 'trunk';
     else if (allowed && physical) physical.allowedVlans = parseVlanList(allowed[1]);
     else if (lower === 'shutdown') target.enabled = false;
     else if (lower === 'no shutdown') target.enabled = true;
     else output = [`% Unknown interface command: ${command}`, 'Type ? for available commands.'];
   }
-  return { session: nextSession, config, interfaces, output, saved };
+  return { session: nextSession, config, interfaces, firewall, output, saved };
 }
 
-function help(mode) {
+function help(session, config) {
+  const mode = session.mode;
   if (mode === 'user') return ['enable                         Enter privileged mode'];
-  if (mode === 'privileged') return ['configure terminal             Enter configuration mode', 'show interfaces                Show zones, addresses, and trunks', 'show vlans                     List trunk VLAN gateways and zones', 'show running-config            Display active configuration', 'write memory                   Save the active configuration'];
-  if (mode === 'config') return ['hostname <name>                Set the firewall hostname', 'interface <name>               Select outside, inside, dmz, or optional', 'interface <name>.<vlan>        Edit a tagged subinterface', 'interface port <1-4>           Physical-port alias', 'no interface <name>.<vlan>     Remove a subinterface'];
-  return ['mode routed                    Assign one network directly to this port', 'vlan <id>                      Set VLAN encapsulation (ASA style)', 'encapsulation dot1Q <id>       Set 802.1Q encapsulation (generic)', 'no vlan                        Remove VLAN encapsulation', 'ip address <address>/<prefix>  Assign an interface address', 'add vlan <id> ip <ip>/<prefix> zone <zone>', 'remove vlan <id>               Remove a VLAN from this trunk', 'zone <name>                    Change the selected interface zone', 'trunk allowed vlan <list>      Limit allowed VLANs', 'shutdown / no shutdown         Disable or enable the interface'];
+  if (mode === 'privileged') return ['configure terminal             Enter global configuration mode', 'exit                           Close the command-line session', 'show interfaces                Show zones, addresses, and trunks', 'show policies                  Display ordered security policies', 'show policy <sequence>         Display one security policy', 'show running-config            Display the active configuration', 'show vlans                     List trunk VLAN gateways and zones', 'write memory                   Save the active configuration'];
+  if (mode === 'config') return ['end                            Return to privileged mode', 'exit                           Return to privileged mode', 'hostname <name>                Set the firewall hostname', 'interface <name>               Select outside, inside, dmz, or optional', 'interface <name>.<vlan>        Create or select a tagged subinterface', 'no interface <name>.<vlan>     Remove a subinterface', ...firewallHelp('config')];
+  const common = ['end                            Return to privileged mode', 'exit                           Return to global configuration mode', 'ip address <address>/<prefix>  Assign an interface address', 'no ip address                  Remove the interface address', 'no shutdown                    Enable the interface', 'shutdown                       Disable the interface', 'zone <name>                    Set the interface security zone'];
+  if (config.subinterfaces[session.interfaceId]) return ['encapsulation dot1Q <id>       Set IEEE 802.1Q encapsulation', 'no encapsulation dot1Q         Remove IEEE 802.1Q encapsulation', 'no vlan                        Remove VLAN encapsulation', 'vlan <id>                      Set VLAN encapsulation (ASA-compatible alias)', ...common];
+  return ['mode routed                    Assign one routed network to this port', 'mode trunk                     Carry multiple tagged VLANs', 'trunk allowed vlan <list>      Set the VLANs allowed on this trunk', ...common];
 }
 
 function showInterfaces(config, interfaces) {
@@ -160,10 +163,4 @@ function parseVlanList(value) {
     for (let id = start; id <= end; id++) ids.add(id);
   }
   return [...ids].sort((a, b) => a - b);
-}
-
-function parsePortInterface(command) {
-  const match = command.match(/^interface\s+port\s*([1-4])(?:\.(\d{1,4}))?$/i);
-  if (!match) return null;
-  return [match[0], ['outside', 'inside', 'dmz', 'optional'][Number(match[1]) - 1], match[2]];
 }

@@ -1,6 +1,6 @@
 # PacketTracker
 
-A browser-based network design workspace inspired by Cisco Packet Tracer. The current prototype includes a device library, drag-and-drop canvas, device positioning, local persistence, zoom controls, and JSON export.
+A browser-based, classroom-oriented network design workspace inspired by Cisco Packet Tracer. PacketTracker includes teacher and student accounts, teacher-owned classes with join codes, profile-backed projects, project sharing, a drag-and-drop topology editor, and a vendor-neutral network simulation.
 
 ## Run locally
 
@@ -10,6 +10,10 @@ npm run dev
 ```
 
 The server scans ports `3000` through `3010` and prints the first available URL.
+
+On first launch, register a teacher account. Create a class from the teacher dashboard and give its join code to students. Students select the student role during registration and enter that code.
+
+Application data is stored in `data/packettracker.db` by default. Set `PACKETTRACKER_DB` to use another SQLite path. The `data/` directory is intentionally excluded from Git.
 
 ## Cloudflare Tunnel
 
@@ -36,12 +40,13 @@ npm run start
 
 ## Architecture
 
-- `server.mjs` — Express server, health endpoint, Vite middleware in development
+- `server.mjs` — Express server, platform API, and Vite middleware in development
+- `src/server/platform.mjs` — accounts, sessions, classes, enrollments, projects, and sharing
 - `src/main.jsx` — React application and device catalog
 - `src/styles.css` — responsive editor UI
-- Browser local storage currently stands in for future account-backed saved designs
+- SQLite stores account-backed projects; local storage remains a recovery cache and stores UI preferences
 
-The placed-device model uses stable instance IDs and serializable JSON so it can later move to an authenticated API and support rubric-based autograding.
+Classes and projects are teacher/user scoped from the start, so the deployment can support multiple independent teachers even if it initially has only one. The project document remains serializable JSON so snapshots, assignments, rubric-based grading, and PostgreSQL migration can be added later.
 
 ## Simulation core
 

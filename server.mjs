@@ -2,11 +2,13 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
 import { resolve } from 'node:path';
+import { installPlatformApi } from './src/server/platform.mjs';
 
 const app = express();
 const isDev = process.argv.includes('--dev');
 
 app.use(express.json());
+installPlatformApi(app);
 app.get('/api/health', (_request, response) => {
   response.json({ status: 'ok', service: 'packet-tracker' });
 });

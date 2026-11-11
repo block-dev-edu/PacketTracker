@@ -6,8 +6,9 @@ const unique = values => [...new Set(values.map(Number).filter(Number.isInteger)
 export function validateConnections(devices, connections) {
   const byId = new Map(devices.map(device => [device.instanceId || device.id, device]));
   const conflicts = findDuplicateIpConflicts(devices, connections);
+  const requiredVlans = topologyRequiredVlans(devices, connections);
   return new Map(connections.map(connection => {
-    const result = validateConnection(connection, byId);
+    const result = validateConnection(connection, byId, { requiredVlans });
     const endpointConflicts = [connection.a.deviceId, connection.b.deviceId].flatMap(id => conflicts.get(id) || []);
     if (endpointConflicts.length) {
       const addresses = [...new Set(endpointConflicts.map(conflict => conflict.address))];
@@ -79,7 +80,7 @@ export function findDuplicateIpConflicts(devices, connections) {
   return conflicts;
 }
 
-export function validateConnection(connection, devices) {
+export function validateConnection(connection, devices, context = {}) {
   const byId = devices instanceof Map ? devices : new Map(devices.map(device => [device.instanceId || device.id, device]));
   const a = endpointState(connection.a, byId);
   const b = endpointState(connection.b, byId);
@@ -125,7 +126,7 @@ export function validateConnection(connection, devices) {
     }
   }
 
-  if (a.mode === 'trunk' || b.mode === 'trunk') validateTrunk(result, a, b);
+  if (a.mode === 'trunk' || b.mode === 'trunk') validateTrunk(result, a, b, context.requiredVlans);
   else validateStandardLayer2(result, a, b);
   validateLayer3(result, a, b, connection);
 
@@ -174,10 +175,14 @@ function trunkVlans(device, portId) {
   return [];
 }
 
-function validateTrunk(result, a, b) {
+function validateTrunk(result, a, b, requiredVlans) {
   result.type = 'Trunk';
   result.configuredVlans = unique([...a.trunkVlans, ...b.trunkVlans]);
-  result.vlanStatuses = result.configuredVlans.map(vlan => ({ vlan, status: a.mode === 'trunk' && b.mode === 'trunk' && vlanReady(a, vlan) && vlanReady(b, vlan) ? 'operational' : 'partial' }));
+  const required = requiredVlans instanceof Set ? result.configuredVlans.filter(vlan => requiredVlans.has(vlan)) : result.configuredVlans;
+  result.vlanStatuses = result.configuredVlans.map(vlan => ({
+    vlan,
+    status: a.mode === 'trunk' && b.mode === 'trunk' && vlanReady(a, vlan) && vlanReady(b, vlan) ? 'operational' : required.includes(vlan) ? 'partial' : 'unused'
+  }));
   if (a.mode !== 'trunk' || b.mode !== 'trunk') {
     const trunkEnd = a.mode === 'trunk' ? a : b;
     const otherEnd = a.mode === 'trunk' ? b : a;
@@ -202,11 +207,29 @@ function validateTrunk(result, a, b) {
     result.layers.layer2 = { status: 'misconfigured', detail: 'No VLAN IDs match across this trunk' };
     result.problems.push(`Allowed VLANs do not overlap (${a.trunkVlans.join(', ')} vs ${b.trunkVlans.join(', ')}).`);
     result.corrections.push('Allow at least one matching VLAN on both ends of the trunk.');
-  } else if (result.operationalVlans.length < result.configuredVlans.length) {
+  } else if (required.some(vlan => !result.operationalVlans.includes(vlan))) {
     result.layers.layer2 = { status: 'partial', detail: `Only VLANs ${result.operationalVlans.join(', ')} operate across the trunk` };
-    result.problems.push('Some configured VLANs are missing or disallowed on the opposite trunk port.');
-    result.corrections.push('Make the allowed VLAN lists and VLAN definitions match on both devices.');
-  } else result.layers.layer2 = { status: 'operational', detail: `VLANs ${result.operationalVlans.join(', ')} can cross this trunk` };
+    result.problems.push('A VLAN used by the topology is missing or disallowed on the opposite trunk port.');
+    result.corrections.push('Allow every VLAN used by connected access ports and routed subinterfaces on both ends of the trunk.');
+  } else {
+    const ignored = result.configuredVlans.filter(vlan => !required.includes(vlan) && !result.operationalVlans.includes(vlan));
+    result.layers.layer2 = { status: 'operational', detail: `${result.operationalVlans.length ? `VLANs ${result.operationalVlans.join(', ')} can cross this trunk` : 'The trunk has compatible VLAN configuration'}${ignored.length ? `; unused VLANs ${ignored.join(', ')} do not affect link health` : ''}` };
+  }
+}
+
+function topologyRequiredVlans(devices, connections) {
+  const connectedPorts = new Set(connections.flatMap(connection => [connection.a, connection.b]).map(endpoint => `${endpoint.deviceId}:${endpoint.portId}`));
+  const required = new Set();
+  for (const device of devices) {
+    const deviceId = device.instanceId || device.id;
+    for (const [portId, port] of Object.entries(device.switching?.ports || {})) {
+      if (port.enabled !== false && port.mode === 'access' && connectedPorts.has(`${deviceId}:${portId}`) && Number.isInteger(Number(port.accessVlan))) required.add(Number(port.accessVlan));
+    }
+    for (const sub of [...Object.values(device.ngfw?.subinterfaces || {}), ...Object.values(device.routerConfig?.subinterfaces || {})]) {
+      if (sub.enabled !== false && Number.isInteger(Number(sub.vlanId))) required.add(Number(sub.vlanId));
+    }
+  }
+  return required;
 }
 
 function vlanReady(endpoint, vlan) {

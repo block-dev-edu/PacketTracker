@@ -1,3 +1,5 @@
+import { contextHelp, isHelpRequest } from './cliHelp.js';
+
 const clone = value => structuredClone(value);
 
 export function createRouterCliSession() { return { mode: 'user', interfaceId: null }; }
@@ -18,7 +20,7 @@ export function executeRouterCommand(session, currentConfig, currentInterfaces, 
   const interfaces = clone(currentInterfaces || {});
   let output = [], saved = false;
   if (!command) return { session: nextSession, config, interfaces, output, saved };
-  if (lower === '?' || lower === 'help') return { session: nextSession, config, interfaces, output: help(session.mode), saved };
+  if (isHelpRequest(command)) return { session: nextSession, config, interfaces, output: contextHelp(help(session, config), command), saved };
   if (lower === 'end') return { session: { mode: 'privileged', interfaceId: null }, config, interfaces, output, saved };
   if (lower === 'exit') {
     if (session.mode === 'interface') return { session: { mode: 'config', interfaceId: null }, config, interfaces, output, saved };
@@ -34,7 +36,7 @@ export function executeRouterCommand(session, currentConfig, currentInterfaces, 
     else if (lower === 'show ip interface brief' || lower === 'show ip int brief') output = showIpInterfaces(config, interfaces);
     else if (lower === 'show ip route') output = showRoutes(interfaces);
     else if (lower === 'show running-config' || lower === 'show run') output = runningConfig(config, interfaces);
-    else if (lower === 'write memory' || lower === 'copy running-config startup-config') { output = ['Configuration saved.']; saved = true; }
+    else if (lower === 'write memory' || lower === 'copy running-config startup-config') saved = true;
     else output = [`% Unknown command: ${command}`, 'Type ? for available commands.'];
   } else if (session.mode === 'config') {
     const hostname = command.match(/^hostname\s+([a-z0-9][a-z0-9-]{0,31})$/i);
@@ -103,11 +105,14 @@ function maskToPrefix(mask) {
   return /^1*0*$/.test(bits) ? bits.indexOf('0') === -1 ? 32 : bits.indexOf('0') : null;
 }
 
-function help(mode) {
+function help(session, config) {
+  const mode = session.mode;
   if (mode === 'user') return ['enable                         Enter privileged mode'];
-  if (mode === 'privileged') return ['configure terminal             Enter configuration mode', 'show ip interface brief        List interface addressing', 'show ip route                  Show connected routes', 'show running-config            Display active configuration', 'write memory                   Save configuration'];
-  if (mode === 'config') return ['interface ethernet <1-4>       Select a physical interface', 'interface ethernet <n>.<unit>  Create or select a subinterface', 'no interface ethernet <n>.<u> Remove a subinterface'];
-  return ['encapsulation dot1Q <vlan>    Assign 802.1Q encapsulation', 'ip address <ip> <mask>         Assign an address and subnet mask', 'ip address <ip>/<prefix>       Assign using CIDR notation', 'no shutdown                    Enable the interface', 'no encapsulation dot1Q         Remove VLAN encapsulation'];
+  if (mode === 'privileged') return ['configure terminal             Enter global configuration mode', 'disable                        Return to user mode', 'exit                           Close the command-line session', 'show ip interface brief        List interface addressing', 'show ip route                  Show connected routes', 'show running-config            Display the active configuration', 'write memory                   Save the active configuration'];
+  if (mode === 'config') return ['end                            Return to privileged mode', 'exit                           Return to privileged mode', 'hostname <name>                Set the router hostname', 'interface ethernet <1-4>       Select a physical interface', 'interface ethernet <n>.<unit>  Create or select a VLAN subinterface', 'no interface ethernet <n>.<unit>  Remove a VLAN subinterface'];
+  const common = ['end                            Return to privileged mode', 'exit                           Return to global configuration mode', 'ip address <ip> <mask>         Assign an address and subnet mask', 'ip address <ip>/<prefix>       Assign an address using CIDR notation', 'no ip address                  Remove the interface address', 'no shutdown                    Enable the interface', 'shutdown                       Disable the interface'];
+  if (config.subinterfaces[session.interfaceId]) return ['encapsulation dot1Q <vlan>    Assign IEEE 802.1Q VLAN tagging', 'no encapsulation dot1Q         Remove VLAN tagging', ...common];
+  return common;
 }
 
 function showIpInterfaces(config, interfaces) {

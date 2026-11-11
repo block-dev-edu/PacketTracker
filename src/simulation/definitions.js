@@ -57,13 +57,20 @@ export const DEVICE_DEFINITIONS = {
       }
     }
   },
+  ap: {
+    name: 'Access Point', capabilities: ['switching', 'wifi'],
+    ports: [
+      { id: 'eth0', label: 'Ethernet uplink', kind: 'switched', bridge: 'lan' },
+      { id: 'wifi', label: 'Wi-Fi radio', kind: 'wireless', bridge: 'lan' }
+    ]
+  },
   'firewall-stateless': {
     name: 'Stateless Firewall', capabilities: ['ip', 'routing', 'acl', 'statelessFirewall'],
     ports: [
       { id: 'outside', label: 'Outside', kind: 'routed', zone: 'outside' },
       { id: 'inside', label: 'Inside', kind: 'routed', zone: 'inside' }
     ],
-    defaults: { firewall: { mode: 'stateless', defaultAction: 'allow' } }
+    defaults: { firewall: { mode: 'stateless', policies: [] } }
   },
   'firewall-stateful': {
     name: 'Stateful Firewall', capabilities: ['ip', 'routing', 'acl', 'statelessFirewall', 'statefulFirewall'],
@@ -71,10 +78,10 @@ export const DEVICE_DEFINITIONS = {
       { id: 'outside', label: 'Outside', kind: 'routed', zone: 'outside' },
       { id: 'inside', label: 'Inside', kind: 'routed', zone: 'inside' }
     ],
-    defaults: { firewall: { mode: 'stateful', defaultInbound: 'deny', defaultOutbound: 'allow' } }
+    defaults: { firewall: { mode: 'stateful', policies: [] } }
   },
   'firewall-ngfw': {
-    name: 'Next-Generation Firewall', capabilities: ['ip', 'routing', 'statefulFirewall', 'appAwareness', 'ips', 'deepInspection', 'cli', 'vlanTrunk'],
+    name: 'Next-Generation Firewall', capabilities: ['ip', 'routing', 'acl', 'statefulFirewall', 'appAwareness', 'ips', 'deepInspection', 'cli', 'vlanTrunk'],
     ports: [
       { id: 'outside', label: 'Outside', kind: 'routed', zone: 'outside' },
       { id: 'inside', label: 'Inside', kind: 'routed', zone: 'inside' },
@@ -82,7 +89,7 @@ export const DEVICE_DEFINITIONS = {
       { id: 'optional', label: 'Optional', kind: 'routed', zone: 'optional' }
     ],
     defaults: {
-      firewall: { mode: 'stateful', defaultInbound: 'deny', defaultOutbound: 'allow' },
+      firewall: { mode: 'stateful', policies: [] },
       ngfw: {
         hostname: 'NGFW',
         ports: Object.fromEntries(['outside', 'inside', 'dmz', 'optional'].map(id => [id, { mode: 'routed', enabled: true, zone: id, allowedVlans: [] }])),
@@ -100,6 +107,10 @@ export const DEVICE_DEFINITIONS = {
       { id: 'eth0', label: 'Ethernet', kind: 'endpoint' },
       { id: 'wifi', label: 'Wi-Fi', kind: 'endpoint-wireless' }
     ]
+  },
+  'ip-phone': {
+    name: 'IP Phone', capabilities: ['ip'],
+    ports: [{ id: 'eth0', label: 'Ethernet', kind: 'endpoint' }]
   },
   server: {
     name: 'Server', capabilities: ['ip'],

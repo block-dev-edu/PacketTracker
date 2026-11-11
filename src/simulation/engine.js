@@ -298,6 +298,16 @@ export class NetworkSimulation {
   }
 
   firewallAllows(device, incoming, outgoing, packet, reply) {
+    const policies = [...(device.firewall.policies || [])].filter(rule => rule.action).sort((a, b) => a.sequence - b.sequence);
+    if (policies.length) {
+      const sourceZone = this.interfaceZone(device, incoming), destinationZone = this.interfaceZone(device, outgoing);
+      const reverseState = `${device.id}|${packet.protocol}|${packet.destinationIp}|${packet.sourceIp}`;
+      if (reply && device.firewall.mode === 'stateful' && this.connectionStates.has(reverseState)) return true;
+      const rule = policies.find(item => (item.sourceZone === 'any' || item.sourceZone === sourceZone) && (item.destinationZone === 'any' || item.destinationZone === destinationZone) && addressMatches(item.sourceAddress, packet.sourceIp) && addressMatches(item.destinationAddress, packet.destinationIp) && (item.protocol === 'any' || item.protocol === packet.protocol));
+      const allowed = (rule?.action || 'allow') === 'allow';
+      if (allowed && device.firewall.mode === 'stateful') this.connectionStates.add(`${device.id}|${packet.protocol}|${packet.sourceIp}|${packet.destinationIp}`);
+      return allowed;
+    }
     if (device.firewall.mode === 'stateful') {
       const enteringWan = incoming === device.nat.outside && outgoing === device.nat.inside;
       if (enteringWan) return reply && this.natSessions.some(session => session.routerId === device.id && session.destinationIp === packet.sourceIp && session.insideIp === packet.destinationIp);
@@ -308,6 +318,14 @@ export class NetworkSimulation {
       return rule ? rule.action === 'allow' : true;
     }
     return true;
+  }
+
+  interfaceZone(device, interfaceId) {
+    const subinterface = device.ngfw?.subinterfaces?.[interfaceId];
+    if (subinterface?.zone) return subinterface.zone;
+    const configuredPort = device.ngfw?.ports?.[interfaceId];
+    if (configuredPort?.zone) return configuredPort.zone;
+    return device.definition.ports.find(port => port.id === interfaceId)?.zone || interfaceId;
   }
 
   snapshot() {
@@ -325,4 +343,11 @@ export class NetworkSimulation {
     }
     this.links = clone(snapshot.links || []);
   }
+}
+
+function addressMatches(match, address) {
+  if (!match || match === 'any') return true;
+  const [network, prefixText] = match.split('/');
+  try { return isInSubnet(address, network, Number(prefixText)); }
+  catch { return false; }
 }
