@@ -2,7 +2,7 @@ export const connectTwoPcsActivity = {
   schemaVersion: '1.0',
   key: 'connect-two-pcs',
   title: 'Connect Two PCs',
-  description: 'Build a small local network by connecting two computers through a basic Ethernet switch.',
+  description: 'Build a small Layer 2 network by connecting two computers through a basic Ethernet switch (frames can travel locally by MAC address; IP addresses are not required).',
   category: 'Switches',
   skills: ['ethernet-connections', 'switching', 'local-network'],
   startingNetwork: {
@@ -53,7 +53,7 @@ export const connectTwoPcsActivity = {
 
 export const configureWorkstationIpv4Activity = {
   schemaVersion: '1.0', key: 'configure-workstation-ipv4', title: 'Configure Workstation IPv4',
-  description: 'Complete a workstation IPv4 configuration so it can communicate with another computer on its local network.',
+  description: 'Complete a workstation IPv4 configuration for Layer 3 reachability (valid IP addresses and subnet settings allow the computers to reach each other by IP).',
   category: 'End Devices', skills: ['ipv4-addressing', 'subnet-prefix', 'connectivity-testing'],
   startingNetwork: {
     version: 2,
@@ -83,7 +83,7 @@ export const configureWorkstationIpv4Activity = {
 
 export const buildSwitchedLanActivity = {
   schemaVersion: '1.0', key: 'build-switched-lan', title: 'Build a Switched LAN',
-  description: 'Connect three computers through one Ethernet switch so every assigned workstation shares the local network.',
+  description: 'Connect three computers through one Ethernet switch so they share a Layer 2 network (frames can travel locally by MAC address; IP addresses are not required).',
   category: 'Switches', skills: ['ethernet-connections', 'switch-port-selection', 'layer-2-domains'],
   startingNetwork: {
     version: 2,
@@ -108,4 +108,99 @@ export const buildSwitchedLanActivity = {
   status: 'published', visibility: 'global', definitionVersion: 1
 };
 
-export const builtInActivities = [connectTwoPcsActivity, configureWorkstationIpv4Activity, buildSwitchedLanActivity];
+export const configureEdgeRouterActivity = {
+  schemaVersion: '1.0', key: 'configure-edge-router', title: 'Configure an Edge Router',
+  description: 'Configure both routed interfaces so a local workstation can reach an upstream network at Layer 3.',
+  category: 'Routers', skills: ['routed-interfaces', 'default-gateway', 'layer-3-forwarding'],
+  startingNetwork: {
+    version: 2,
+    devices: [
+      { id: 'pc', instanceId: 'edge-client', assignmentRoleId: 'inside-client', customName: 'Office PC', x: 120, y: 220, interfaces: { eth0: { address: '192.168.10.10', prefix: 24 } }, gateway: '192.168.10.1' },
+      { id: 'switch-basic', instanceId: 'edge-switch', customName: 'Office Switch', x: 410, y: 220 },
+      { id: 'router-basic', instanceId: 'edge-router', customName: 'Edge Router', x: 700, y: 220, interfaces: {} },
+      { id: 'server', instanceId: 'edge-upstream', assignmentRoleId: 'upstream-host', customName: 'Upstream Host', x: 1000, y: 220, interfaces: { eth0: { address: '198.51.100.10', prefix: 24 } }, gateway: '198.51.100.1' }
+    ],
+    connections: [
+      { id: 'edge-client-link', a: { deviceId: 'edge-client', portId: 'eth0' }, b: { deviceId: 'edge-switch', portId: 'eth0' } },
+      { id: 'edge-lan-link', a: { deviceId: 'edge-switch', portId: 'eth1' }, b: { deviceId: 'edge-router', portId: 'eth0' } },
+      { id: 'edge-wan-link', a: { deviceId: 'edge-router', portId: 'eth1' }, b: { deviceId: 'edge-upstream', portId: 'eth0' } }
+    ], notes: [], segments: []
+  },
+  supportedLevels: ['guided', 'assisted', 'independent'],
+  instructions: {
+    guided: { summary: 'Address both edge-router interfaces and verify routed communication.', objectives: ['Configure Ethernet 1 as 192.168.10.1/24.', 'Configure Ethernet 2 as 198.51.100.1/24.', 'Make the Office PC reach the Upstream Host by IP.'], steps: ['Select the Edge Router.', 'Set Ethernet 1 to 192.168.10.1 with prefix 24.', 'Set Ethernet 2 to 198.51.100.1 with prefix 24.', 'Ping the Upstream Host from the Office PC, then check the activity.'], hints: ['Each router interface belongs to a different subnet.', 'The endpoint default gateways are already configured.'] },
+    assisted: { summary: 'Configure the edge router between the office and upstream subnets.', objectives: ['Use the correct address on each routed interface.', 'Establish Layer 3 reachability.'], steps: [], hints: ['The router uses the .1 address in each directly connected /24 network.'] },
+    independent: { summary: 'Bring the pre-cabled edge router online and establish upstream reachability.', objectives: ['Configure and verify both routed interfaces.'], steps: [], hints: [] }
+  },
+  requirements: { evaluator: 'assignment-v0.1', specification: {
+    schemaVersion: '0.1', scenario: { id: 'configure-edge-router', title: 'Configure an Edge Router', description: 'Address the edge router and establish Layer 3 reachability.', objectives: ['Configure two routed interfaces.', 'Route traffic between the local and upstream subnets.'] },
+    roles: [{ id: 'inside-client', name: 'Office PC', deviceTypes: ['pc'], count: 1 }, { id: 'upstream-host', name: 'Upstream Host', deviceTypes: ['server'], count: 1 }],
+    relationships: [{ id: 'office-upstream', from: 'inside-client', to: 'upstream-host', action: 'allow', layer: 'l3', protocol: 'icmp' }], constraints: [],
+    configuration: [{ id: 'edge-interface-addressing', type: 'routed_interfaces', deviceId: 'edge-router', title: 'Router interface addressing', description: 'Configure each routed interface in its directly connected subnet.', interfaces: { eth0: { address: '192.168.10.1', prefix: 24 }, eth1: { address: '198.51.100.1', prefix: 24 } } }],
+    settings: { allowExtraDevices: true, showLiveProgress: true, showFailureReasons: true }
+  } }, status: 'published', visibility: 'global', definitionVersion: 1
+};
+
+export const createManagedVlansActivity = {
+  schemaVersion: '1.0', key: 'create-managed-switch-vlans', title: 'Create Managed Switch VLANs',
+  description: 'Create two VLANs and assign access ports so two workstations occupy separate Layer 2 broadcast domains.',
+  category: 'Switches', skills: ['vlan-creation', 'access-ports', 'layer-2-segmentation'],
+  startingNetwork: {
+    version: 2,
+    devices: [
+      { id: 'pc', instanceId: 'vlan-staff-pc', assignmentRoleId: 'staff', customName: 'Staff PC', x: 160, y: 140, interfaces: { eth0: { address: '10.10.10.10', prefix: 24 } } },
+      { id: 'switch-managed', instanceId: 'vlan-switch', customName: 'Managed Switch', x: 520, y: 240 },
+      { id: 'pc', instanceId: 'vlan-guest-pc', assignmentRoleId: 'guest', customName: 'Guest PC', x: 880, y: 340, interfaces: { eth0: { address: '10.20.20.10', prefix: 24 } } }
+    ],
+    connections: [
+      { id: 'vlan-staff-link', a: { deviceId: 'vlan-staff-pc', portId: 'eth0' }, b: { deviceId: 'vlan-switch', portId: 'eth0' } },
+      { id: 'vlan-guest-link', a: { deviceId: 'vlan-guest-pc', portId: 'eth0' }, b: { deviceId: 'vlan-switch', portId: 'eth1' } }
+    ], notes: [], segments: []
+  },
+  supportedLevels: ['guided', 'assisted', 'independent'],
+  instructions: {
+    guided: { summary: 'Create Staff VLAN 10 and Guest VLAN 20, then assign one access port to each.', objectives: ['Create and name VLANs 10 and 20.', 'Assign Ethernet 1 to VLAN 10.', 'Assign Ethernet 2 to VLAN 20.', 'Verify the PCs are in separate Layer 2 domains.'], steps: ['Open the Managed Switch command line.', 'Create VLAN 10 and name it Staff.', 'Create VLAN 20 and name it Guest.', 'Configure Ethernet 1 as an access port in VLAN 10.', 'Configure Ethernet 2 as an access port in VLAN 20.', 'Use show vlan brief, then check the activity.'], hints: ['Use vlan <id>, name <name>, and switchport access vlan <id>.'] },
+    assisted: { summary: 'Segment the Staff and Guest PCs with the specified VLANs and access ports.', objectives: ['Create VLAN 10 Staff and VLAN 20 Guest.', 'Place each connected port in the correct VLAN.'], steps: [], hints: ['The Staff PC is connected to Ethernet 1; the Guest PC is connected to Ethernet 2.'] },
+    independent: { summary: 'Implement the requested VLAN segmentation on the managed switch.', objectives: ['Create and verify both VLANs and access-port assignments.'], steps: [], hints: [] }
+  },
+  requirements: { evaluator: 'assignment-v0.1', specification: {
+    schemaVersion: '0.1', scenario: { id: 'create-managed-switch-vlans', title: 'Create Managed Switch VLANs', description: 'Separate Staff and Guest with access VLANs.', objectives: ['Create VLAN 10 and VLAN 20.', 'Assign the connected access ports.', 'Verify Layer 2 separation.'] },
+    roles: [{ id: 'staff', name: 'Staff PC', deviceTypes: ['pc'], count: 1 }, { id: 'guest', name: 'Guest PC', deviceTypes: ['pc'], count: 1 }], relationships: [],
+    constraints: [{ id: 'staff-guest-separation', type: 'separate_l2_domains', roles: ['staff', 'guest'] }],
+    configuration: [{ id: 'required-vlans', type: 'switch_vlans', deviceId: 'vlan-switch', title: 'VLAN and access-port configuration', description: 'Create the named VLANs and assign each connected access port.', vlans: [{ id: 10, name: 'Staff' }, { id: 20, name: 'Guest' }], accessPorts: { eth0: 10, eth1: 20 } }],
+    settings: { allowExtraDevices: true, showLiveProgress: true, showFailureReasons: true }
+  } }, status: 'published', visibility: 'global', definitionVersion: 1
+};
+
+export const basicFirewallPoliciesActivity = {
+  schemaVersion: '1.0', key: 'basic-firewall-policies', title: 'Configure Basic Firewall Policies',
+  description: 'Build an ordered firewall policy that permits required outbound traffic, blocks new inbound traffic, and ends with an explicit deny-all rule.',
+  category: 'Security', skills: ['firewall-policies', 'first-match-order', 'default-deny'],
+  startingNetwork: {
+    version: 2,
+    devices: [
+      { id: 'pc', instanceId: 'policy-client', assignmentRoleId: 'inside-client', customName: 'Inside PC', x: 150, y: 220, interfaces: { eth0: { address: '10.0.0.10', prefix: 24 } }, gateway: '10.0.0.1' },
+      { id: 'firewall-stateful', instanceId: 'policy-firewall', customName: 'Edge Firewall', x: 520, y: 220, interfaces: { inside: { address: '10.0.0.1', prefix: 24 }, outside: { address: '198.51.100.1', prefix: 24 } }, firewall: { mode: 'stateful', policies: [] } },
+      { id: 'server', instanceId: 'policy-server', assignmentRoleId: 'outside-server', customName: 'Outside Server', x: 890, y: 220, interfaces: { eth0: { address: '198.51.100.10', prefix: 24 } }, gateway: '198.51.100.1' }
+    ],
+    connections: [
+      { id: 'policy-inside-link', a: { deviceId: 'policy-client', portId: 'eth0' }, b: { deviceId: 'policy-firewall', portId: 'inside' } },
+      { id: 'policy-outside-link', a: { deviceId: 'policy-firewall', portId: 'outside' }, b: { deviceId: 'policy-server', portId: 'eth0' } }
+    ], notes: [], segments: []
+  },
+  supportedLevels: ['guided', 'assisted', 'independent'],
+  instructions: {
+    guided: { summary: 'Create two ordered traffic policies followed by a final deny-all policy.', objectives: ['Policy 10: allow ICMP from inside to outside.', 'Policy 20: deny ICMP from outside to inside.', 'Final policy: deny any remaining traffic.'], steps: ['Open the Edge Firewall command line.', 'Create policy 10 with source-zone inside, destination-zone outside, protocol icmp, and action allow.', 'Create policy 20 with source-zone outside, destination-zone inside, protocol icmp, and action deny.', 'Create policy 10000 with any zones, any protocol, and action deny.', 'Use show policies to verify first-match order, then check the activity.'], hints: ['Policies are evaluated from the lowest sequence number to the highest.', 'The deny-all rule must be last.'] },
+    assisted: { summary: 'Implement the required inside-to-outside allow, outside-to-inside deny, and final deny-all policy.', objectives: ['Create the two directional ICMP policies.', 'End the ordered policy with explicit deny all.'], steps: [], hints: ['Leave sequence-number gaps and verify the catch-all rule is last.'] },
+    independent: { summary: 'Implement and verify the required ordered default-deny firewall policy.', objectives: ['Permit required traffic, block prohibited traffic, and deny everything unmatched.'], steps: [], hints: [] }
+  },
+  requirements: { evaluator: 'assignment-v0.1', specification: {
+    schemaVersion: '0.1', scenario: { id: 'basic-firewall-policies', title: 'Configure Basic Firewall Policies', description: 'Implement three ordered policies on the provided firewall.', objectives: ['Allow inside-to-outside ICMP.', 'Deny outside-to-inside ICMP.', 'Finish with explicit deny all.'] },
+    roles: [{ id: 'inside-client', name: 'Inside PC', deviceTypes: ['pc'], count: 1 }, { id: 'outside-server', name: 'Outside Server', deviceTypes: ['server'], count: 1 }],
+    relationships: [{ id: 'outbound-icmp', from: 'inside-client', to: 'outside-server', action: 'allow', layer: 'l3', protocol: 'icmp' }, { id: 'inbound-icmp', from: 'outside-server', to: 'inside-client', action: 'deny', layer: 'l3', protocol: 'icmp' }], constraints: [],
+    configuration: [{ id: 'ordered-firewall-policy', type: 'firewall_policies', deviceId: 'policy-firewall', title: 'Ordered firewall policies', description: 'Create the two directional policies and finish with an explicit deny-all rule.', policies: [{ sourceZone: 'inside', destinationZone: 'outside', protocol: 'icmp', action: 'allow' }, { sourceZone: 'outside', destinationZone: 'inside', protocol: 'icmp', action: 'deny' }], requireFinalDenyAll: true }],
+    settings: { allowExtraDevices: true, showLiveProgress: true, showFailureReasons: true }
+  } }, status: 'published', visibility: 'global', definitionVersion: 1
+};
+
+export const builtInActivities = [connectTwoPcsActivity, configureWorkstationIpv4Activity, buildSwitchedLanActivity, configureEdgeRouterActivity, createManagedVlansActivity, basicFirewallPoliciesActivity];

@@ -13,6 +13,10 @@ function pairResult(id, source, destination, expected, observed, status, reason)
   return { id, sourceDeviceId: deviceId(source), destinationDeviceId: deviceId(destination), expected, observed, status, reason };
 }
 
+const normalizedAddress = value => String(value || '').trim();
+const policyMatches = (actual, expected) => ['sourceZone', 'destinationZone', 'sourceAddress', 'destinationAddress', 'protocol', 'action'].every(field => expected[field] == null || (actual[field] || 'any') === expected[field]);
+const configurationCheck = (id, status, reason, expected = null, observed = null) => ({ id, status, reason, expected, observed });
+
 export function evaluateAssignment(spec, devices, connections) {
   if (!spec) return { status: 'not_evaluable', summary: { passed: 0, failed: 0, not_evaluable: 0 }, requirements: [], roleStatus: [] };
   const simulation = createTopologySimulation(devices, connections);
@@ -74,6 +78,46 @@ export function evaluateAssignment(spec, devices, connections) {
     }
     const status = checks.length === 0 ? 'not_evaluable' : checks.some(check => check.status === 'failed') ? 'failed' : 'passed';
     requirements.push({ id: constraint.id, type: 'constraint', ...constraint, status, checks });
+  }
+
+  for (const requirement of spec.configuration || []) {
+    const device = devices.find(item => deviceId(item) === requirement.deviceId), checks = [];
+    if (!device) {
+      requirements.push({ ...requirement, configurationType: requirement.type, type: 'configuration', status: 'not_evaluable', checks, reason: `Required device ${requirement.deviceId} is missing.` });
+      continue;
+    }
+    if (requirement.type === 'routed_interfaces') {
+      for (const [interfaceId, expected] of Object.entries(requirement.interfaces || {})) {
+        const actual = device.interfaces?.[interfaceId];
+        const passed = normalizedAddress(actual?.address) === normalizedAddress(expected.address) && Number(actual?.prefix) === Number(expected.prefix);
+        checks.push(configurationCheck(interfaceId, passed ? 'passed' : 'failed', passed ? `${interfaceId} is configured as ${expected.address}/${expected.prefix}.` : `${interfaceId} must be ${expected.address}/${expected.prefix}.`, `${expected.address}/${expected.prefix}`, actual?.address ? `${actual.address}/${actual.prefix}` : 'unconfigured'));
+      }
+    } else if (requirement.type === 'switch_vlans') {
+      for (const expected of requirement.vlans || []) {
+        const actualName = device.switching?.vlans?.[expected.id];
+        const passed = Boolean(actualName) && (!expected.name || actualName === expected.name);
+        checks.push(configurationCheck(`vlan-${expected.id}`, passed ? 'passed' : 'failed', passed ? `VLAN ${expected.id}${expected.name ? ` (${expected.name})` : ''} exists.` : `Create VLAN ${expected.id}${expected.name ? ` and name it ${expected.name}` : ''}.`));
+      }
+      for (const [portId, vlanId] of Object.entries(requirement.accessPorts || {})) {
+        const port = device.switching?.ports?.[portId], passed = port?.mode === 'access' && Number(port.accessVlan) === Number(vlanId);
+        checks.push(configurationCheck(`port-${portId}`, passed ? 'passed' : 'failed', passed ? `${portId} is an access port in VLAN ${vlanId}.` : `Configure ${portId} as an access port in VLAN ${vlanId}.`));
+      }
+    } else if (requirement.type === 'firewall_policies') {
+      const policies = [...(device.firewall?.policies || [])].filter(policy => policy.action).sort((a, b) => a.sequence - b.sequence);
+      let previousIndex = -1;
+      for (const [index, expected] of (requirement.policies || []).entries()) {
+        const policyIndex = policies.findIndex((policy, candidateIndex) => candidateIndex > previousIndex && policyMatches(policy, expected));
+        const passed = policyIndex >= 0;
+        if (passed) previousIndex = policyIndex;
+        checks.push(configurationCheck(`policy-${index + 1}`, passed ? 'passed' : 'failed', passed ? `Required policy ${index + 1} is configured in order.` : `Configure required policy ${index + 1} with the specified zones, protocol, addresses, and action.`));
+      }
+      if (requirement.requireFinalDenyAll) {
+        const final = policies.at(-1), passed = Boolean(final && policyMatches(final, { sourceZone: 'any', destinationZone: 'any', sourceAddress: 'any', destinationAddress: 'any', protocol: 'any', action: 'deny' }));
+        checks.push(configurationCheck('final-deny-all', passed ? 'passed' : 'failed', passed ? 'The final policy is an explicit deny-all rule.' : 'Add an explicit deny-all rule as the final policy.'));
+      }
+    }
+    const status = checks.length && checks.every(check => check.status === 'passed') ? 'passed' : 'failed';
+    requirements.push({ ...requirement, configurationType: requirement.type, type: 'configuration', status, checks });
   }
 
   const allStatuses = [...roleStatus, ...requirements].map(item => item.status);

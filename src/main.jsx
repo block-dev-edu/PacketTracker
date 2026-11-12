@@ -169,8 +169,13 @@ function assignmentPointBreakdown(spec, evaluation) {
     result.passed += item.checks?.filter(check => check.status === 'passed').length || 0;
     return result;
   }, { passed: 0, total: 0 });
+  const configuration = (evaluation?.requirements || []).filter(item => item.type === 'configuration').reduce((result, item) => {
+    result.total += item.checks?.length || 1;
+    result.passed += item.checks?.filter(check => check.status === 'passed').length || 0;
+    return result;
+  }, { passed: 0, total: 0 });
   const connect = relationshipPoints('allow'), block = relationshipPoints('deny');
-  return { devices, connect, block, segmentation, all: { passed: devices.passed + connect.passed + block.passed + segmentation.passed, total: devices.total + connect.total + block.total + segmentation.total } };
+  return { devices, connect, block, segmentation, configuration, all: { passed: devices.passed + connect.passed + block.passed + segmentation.passed + configuration.passed, total: devices.total + connect.total + block.total + segmentation.total + configuration.total } };
 }
 
 const ASSIGNMENT_AI_PROMPT = `You are helping a teacher create a PacketTracker network architecture assignment. Interview the teacher one question at a time, then return one JSON object and no markdown around it.
@@ -1322,6 +1327,7 @@ function AssignmentChallengeModal({ spec, evaluation, devices, activeCategory, o
   const allowedRelationships = relationships.filter(item => item.action === 'allow');
   const blockedRelationships = relationships.filter(item => item.action === 'deny');
   const constraints = evaluation.requirements.filter(item => item.type === 'constraint');
+  const configuration = evaluation.requirements.filter(item => item.type === 'configuration');
   const roleNames = new Map(spec.roles.map(role => [role.id, role.name]));
   const deviceNames = new Map(devices.map(device => [device.instanceId, device.customName || device.name]));
   const devicesById = new Map(devices.map(device => [device.instanceId, device]));
@@ -1331,7 +1337,8 @@ function AssignmentChallengeModal({ spec, evaluation, devices, activeCategory, o
     { id: 'devices', label: 'Devices & roles', icon: Users, ...points.devices },
     { id: 'must-connect', label: 'Must connect', icon: Cable, ...points.connect },
     { id: 'must-block', label: 'Must be blocked', icon: ShieldCheck, ...points.block },
-    { id: 'segmentation', label: 'Segmentation', icon: Grid3X3, ...points.segmentation }
+    { id: 'segmentation', label: 'Segmentation', icon: Grid3X3, ...points.segmentation },
+    { id: 'configuration', label: 'Configuration', icon: Cpu, ...points.configuration }
   ];
   useEffect(() => {
     const closeOnEscape = event => { if (event.key === 'Escape') onClose(); };
@@ -1345,9 +1352,11 @@ function AssignmentChallengeModal({ spec, evaluation, devices, activeCategory, o
     : `Separate ${requirement.roles.map(role => roleNames.get(role) || role).join(' and ')}`;
   const requirementDescription = requirement => requirement.type === 'relationship'
     ? requirement.action === 'allow'
-      ? `${roleNames.get(requirement.from) || requirement.from} must be able to ${requirement.layer === 'l2' ? 'communicate on the same local network with' : 'ping'} ${roleNames.get(requirement.to) || requirement.to}.`
+      ? requirement.layer === 'l2'
+        ? `${roleNames.get(requirement.from) || requirement.from} and ${roleNames.get(requirement.to) || requirement.to} must share a Layer 2 network (Ethernet frames can travel between them by MAC address; IP addresses are not required).`
+        : `${roleNames.get(requirement.from) || requirement.from} must be able to ping ${roleNames.get(requirement.to) || requirement.to} at Layer 3 (valid IP addressing and any required routing must deliver IP packets).`
       : `${roleNames.get(requirement.from) || requirement.from} must not be able to initiate communication with ${roleNames.get(requirement.to) || requirement.to}.`
-    : 'These roles must remain in separate Layer 2 broadcast domains.';
+    : 'These roles must remain in separate Layer 2 broadcast domains (Ethernet broadcasts and local MAC-address traffic must not cross between them).';
   const friendlyReason = check => {
     if (check.status === 'passed') return check.expected === 'deny' ? 'Communication is correctly blocked by a working security policy.' : 'Communication is working as required.';
     if (check.observed === 'disconnected') return 'Both devices must be connected before this can be tested.';
@@ -1373,7 +1382,7 @@ function AssignmentChallengeModal({ spec, evaluation, devices, activeCategory, o
     const endpointGroups = [requirement.from, requirement.to].map(roleId => ({ roleId, name: roleNames.get(roleId) || roleId, devices: devices.filter(device => device.assignmentRoleId === roleId) }));
     return <article className={`challenge-requirement collapsible ${requirement.status} ${expanded ? 'expanded' : ''}`} key={requirement.id}>
       <button className="challenge-requirement-toggle" onClick={() => toggleRequirement(requirement.id)} aria-expanded={expanded}>
-        <span className="challenge-requirement-main"><span className="challenge-requirement-status"><i/><span>{statusLabel(requirement.status)}</span></span><strong>{requirementTitle(requirement)}</strong><small>{requirementDescription(requirement)}</small><span className="challenge-card-progress"><b>{passedChecks}/{totalChecks || 1}</b><span>{requirement.action === 'allow' ? 'connections working' : 'connections correctly blocked'}</span></span></span>
+        <span className="challenge-requirement-main"><span className="challenge-requirement-status"><i/><span>{statusLabel(requirement.status)}</span></span><strong>{requirementTitle(requirement)}</strong><small>{requirementDescription(requirement)}</small><span className="challenge-card-progress"><b>{passedChecks}/{totalChecks || 1}</b><span>{requirement.action === 'allow' ? (requirement.layer === 'l2' ? 'Layer 2 paths working' : 'Layer 3 paths working') : 'connections correctly blocked'}</span></span></span>
         <ChevronDown size={21}/>
       </button>
       {expanded && <div className="challenge-requirement-expanded"><div className="challenge-assigned-endpoints">{endpointGroups.map(group => <section key={group.roleId}><strong>{group.name}</strong>{group.devices.length ? group.devices.map(device => <span key={device.instanceId}>{device.customName || device.name}<em>{devicePrimaryAddress(device) || 'No IP address'}</em></span>) : <small>No device assigned</small>}</section>)}</div>{requirement.reason && <div className="challenge-reason">Assign devices to both roles before this requirement can be tested.</div>}{!!requirement.checks?.length && <div className="challenge-check-list">{requirement.checks.map(check => { const source = deviceWithAddress(check.sourceDeviceId), destination = deviceWithAddress(check.destinationDeviceId); return <div className={check.status} key={check.id}><i/><span><span className="challenge-device-pair"><span>{source.name}<em>{source.address}</em></span><b>→</b><span>{destination.name}<em>{destination.address}</em></span></span><small>{friendlyReason(check)}</small></span><b>{checkOutcome(check)}</b></div>; })}</div>}</div>}
@@ -1393,6 +1402,7 @@ function AssignmentChallengeModal({ spec, evaluation, devices, activeCategory, o
           {activeCategory === 'must-connect' && <><div className="challenge-section-heading"><span>Required communication</span><h3>Who must be able to connect?</h3><p>Make every communication path below work in the direction shown.</p></div><div className="challenge-requirement-list">{relationshipCards(allowedRelationships)}</div></>}
           {activeCategory === 'must-block' && <><div className="challenge-section-heading"><span>Required protection</span><h3>Who must be blocked?</h3><p>Use a working security policy to prevent the communication shown below. A broken or disconnected network does not count as successfully blocked.</p></div><div className="challenge-requirement-list">{relationshipCards(blockedRelationships)}</div></>}
           {activeCategory === 'segmentation' && <><div className="challenge-section-heading"><span>Local network separation</span><h3>Who must be kept on separate networks?</h3><p>Devices listed here must not share the same local broadcast network.</p></div><div className="challenge-requirement-list">{constraints.length ? constraints.map(requirement => <article className={`challenge-requirement ${requirement.status}`} key={requirement.id}><div className="challenge-requirement-status"><i/><span>{statusLabel(requirement.status)}</span></div><h4>{requirementTitle(requirement)}</h4><p>{requirementDescription(requirement)}</p>{!!requirement.checks?.length && <div className="challenge-check-list">{requirement.checks.map(check => <div className={check.status} key={check.id}><i/><span>{deviceNames.get(check.sourceDeviceId) || 'First device'} ↔ {deviceNames.get(check.destinationDeviceId) || 'Second device'}<small>{check.status === 'passed' ? 'These devices are correctly placed on separate local networks.' : 'These devices are still sharing the same local network.'}</small></span><b>{check.status === 'passed' ? 'Separated' : 'Needs work'}</b></div>)}</div>}</article>) : <div className="challenge-empty">This challenge has no network-separation requirements.</div>}</div></>}
+          {activeCategory === 'configuration' && <><div className="challenge-section-heading"><span>Required device settings</span><h3>What must be configured?</h3><p>These checks inspect the actual saved device configuration and its effect on the simulated network.</p></div><div className="challenge-requirement-list">{configuration.length ? configuration.map(requirement => <article className={`challenge-requirement ${requirement.status}`} key={requirement.id}><div className="challenge-requirement-status"><i/><span>{statusLabel(requirement.status)}</span></div><h4>{requirement.title || 'Device configuration'}</h4><p>{requirement.description || 'Complete every required device setting.'}</p>{requirement.reason && <div className="challenge-reason">{requirement.reason}</div>}<div className="challenge-check-list">{requirement.checks?.map(check => <div className={check.status} key={check.id}><i/><span>{check.reason}</span><b>{check.status === 'passed' ? 'Complete' : 'Needs work'}</b></div>)}</div></article>) : <div className="challenge-empty">This challenge has no device-configuration requirements.</div>}</div></>}
         </main>
       </div>
     </section>
@@ -2260,13 +2270,18 @@ function TeacherClassCard({ course, students, expanded, onToggle, onPresentCode,
 }
 
 function SkillActivityCard({ item, progress, attempts, onStart }) {
+  const [expanded, setExpanded] = useState(false);
   const completedLevels = new Set((attempts || []).filter(attempt => attempt.status === 'completed').map(attempt => attempt.awardedLevel));
   const openAttempt = (attempts || []).find(attempt => attempt.status === 'in_progress');
   const levelButton = level => {
     const completed = completedLevels.has(level);
     return item.definition.supportedLevels.includes(level) && <button key={level} className={`button secondary skill-start-button ${completed ? 'completed' : ''}`} onClick={() => onStart(item, level)}>{completed ? `${levelLabel(level)} Completed` : `Start ${levelLabel(level)}`}</button>;
   };
-  return <article className="skill-activity-card"><div className="skill-card-heading"><span>{item.definition.category}</span><strong>{item.definition.title}</strong><p>{item.definition.description}</p><div>{item.definition.skills.map(skill => <small key={skill}>{skill.replaceAll('-', ' ')}</small>)}</div></div><div className="skill-card-actions">{openAttempt && <span className="skill-in-progress"><RotateCcw size={13}/>{levelLabel(openAttempt.requestedLevel)} in progress</span>}{progress && <span className={`skill-level-badge ${progress.highestLevel}`}><GraduationCap size={14}/>Highest proficiency: {levelLabel(progress.highestLevel)}</span>}<div className="skill-start-buttons">{openAttempt && <button className="button skill-resume-button" onClick={() => onStart(item)}>Resume {levelLabel(openAttempt.requestedLevel)}</button>}{levelButton('guided')}{levelButton('assisted')}{levelButton('independent')}</div></div></article>;
+  return <article className={`skill-activity-card ${expanded ? 'expanded' : 'collapsed'}`}>
+    <button className="skill-card-toggle" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}><span>{expanded ? <ChevronDown size={18}/> : <ChevronRight size={18}/>}<strong>{item.definition.title}</strong></span></button>
+    <div className="skill-card-actions"><div className="skill-start-buttons">{openAttempt && <button className="button skill-resume-button" onClick={() => onStart(item)}>Resume {levelLabel(openAttempt.requestedLevel)}</button>}{levelButton('guided')}{levelButton('assisted')}{levelButton('independent')}</div></div>
+    {expanded && <div className="skill-card-details"><span>{item.definition.category}</span><p>{item.definition.description}</p><div>{item.definition.skills.map(skill => <small key={skill}>{skill.replaceAll('-', ' ')}</small>)}</div>{(openAttempt || progress) && <footer>{openAttempt && <span className="skill-in-progress"><RotateCcw size={13}/>{levelLabel(openAttempt.requestedLevel)} in progress</span>}{progress && <span className={`skill-level-badge ${progress.highestLevel}`}><GraduationCap size={14}/>Highest proficiency: {levelLabel(progress.highestLevel)}</span>}</footer>}</div>}
+  </article>;
 }
 
 function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, onOpenSkillActivity, onPreviewAssignment, onLogout }) {
@@ -2372,8 +2387,7 @@ function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, o
   const visibleActivities = skillCategory === 'incomplete' ? incompleteActivities : skillCategory === 'all' ? data.activities : data.activities.filter(item => item.definition.category === skillCategory);
   const visibleSkillCategories = [...new Set(visibleActivities.map(item => item.definition.category))].sort();
   const totals = data.skillTotals || { total: data.activities.length, completed: 0, guided: 0, assisted: 0, independent: 0, incomplete: data.activities.length };
-  const skillsPanel = <section className="dashboard-panel skills-panel"><div className="dashboard-panel-title"><div><GraduationCap size={18}/><span><strong>Skills Library</strong><small>{totals.completed} of {totals.total} skills completed</small></span></div></div>
-    <div className="skill-library-overview"><div><span><strong>Overall proficiency</strong><small>Each skill is counted at your highest completed level.</small></span><b>{totals.completed} / {totals.total}</b></div><div className="skill-library-progress" aria-label={`${totals.guided} guided, ${totals.assisted} hinted, ${totals.independent} independent, ${totals.incomplete} incomplete`}>{totals.total ? <>{totals.guided > 0 && <i className="guided" style={{ flex: totals.guided }}/>} {totals.assisted > 0 && <i className="assisted" style={{ flex: totals.assisted }}/>} {totals.independent > 0 && <i className="independent" style={{ flex: totals.independent }}/>} {totals.incomplete > 0 && <i className="incomplete" style={{ flex: totals.incomplete }}/>}</> : <i className="incomplete" style={{ flex: 1 }}/>}</div><div className="skill-library-legend"><span><i className="guided"/>Guided</span><span><i className="assisted"/>Hinted</span><span><i className="independent"/>Independent</span><span><i className="incomplete"/>Incomplete</span></div></div>
+  const skillsPanel = <section className="dashboard-panel skills-panel"><div className="dashboard-panel-title skills-library-header"><div><GraduationCap size={18}/><span><strong>Skills Library</strong><small>{totals.completed} of {totals.total} skills completed</small></span></div><div className="skill-library-progress" title={`${totals.guided} guided · ${totals.assisted} hinted · ${totals.independent} independent · ${totals.incomplete} incomplete`} aria-label={`${totals.guided} guided, ${totals.assisted} hinted, ${totals.independent} independent, ${totals.incomplete} incomplete`}>{totals.total ? <>{totals.guided > 0 && <i className="guided" style={{ flex: totals.guided }}/>} {totals.assisted > 0 && <i className="assisted" style={{ flex: totals.assisted }}/>} {totals.independent > 0 && <i className="independent" style={{ flex: totals.independent }}/>} {totals.incomplete > 0 && <i className="incomplete" style={{ flex: totals.incomplete }}/>}</> : <i className="incomplete" style={{ flex: 1 }}/>}</div></div>
     <nav className="skill-category-filters" aria-label="Skill categories"><button className={skillCategory === 'all' ? 'active' : ''} onClick={() => setSkillCategory('all')}>All skills <small>{data.activities.length}</small></button><button className={skillCategory === 'incomplete' ? 'active incomplete-filter' : 'incomplete-filter'} onClick={() => setSkillCategory('incomplete')}>Incomplete <small>{incompleteActivities.length}</small></button>{skillCategories.map(category => <button key={category} className={skillCategory === category ? 'active' : ''} onClick={() => setSkillCategory(category)}>{category}<small>{data.activities.filter(item => item.definition.category === category).length}</small></button>)}</nav>
     <div className="skill-activity-list">{visibleSkillCategories.map(category => { const categoryActivities = visibleActivities.filter(item => item.definition.category === category); return <React.Fragment key={category}><div className="skill-category-heading"><strong>{category}</strong><span>{categoryActivities.length} skill{categoryActivities.length === 1 ? '' : 's'}</span></div>{categoryActivities.map(item => <SkillActivityCard key={item.id} item={item} progress={data.skillProgress.find(entry => entry.activityId === item.id)} attempts={data.activityAttempts[item.id] || []} onStart={onOpenSkillActivity}/>)}</React.Fragment>; })}{!visibleActivities.length && <p>{skillCategory === 'incomplete' ? 'You have completed every available skill.' : 'No skill activities are available in this category.'}</p>}</div>
   </section>;

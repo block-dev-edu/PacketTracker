@@ -51,6 +51,17 @@ export function validateAssignmentSpec(input) {
     for (const id of ids) if (!roleIds.has(id)) errors.push(`constraints[${index}] references unknown role "${id}".`);
   }
 
+  const configuration = Array.isArray(input.configuration) ? input.configuration : [];
+  for (const [index, requirement] of configuration.entries()) {
+    const path = `configuration[${index}]`;
+    if (!text(requirement?.id)) errors.push(`${path}.id is required.`);
+    if (!text(requirement?.deviceId)) errors.push(`${path}.deviceId is required.`);
+    if (!['routed_interfaces', 'switch_vlans', 'firewall_policies'].includes(requirement?.type)) errors.push(`${path}.type is unsupported.`);
+    if (requirement?.type === 'routed_interfaces' && (!requirement.interfaces || typeof requirement.interfaces !== 'object' || !Object.keys(requirement.interfaces).length)) errors.push(`${path}.interfaces must define at least one interface.`);
+    if (requirement?.type === 'switch_vlans' && (!Array.isArray(requirement.vlans) || !requirement.vlans.length)) errors.push(`${path}.vlans must contain at least one VLAN.`);
+    if (requirement?.type === 'firewall_policies' && (!Array.isArray(requirement.policies) || !requirement.policies.length)) errors.push(`${path}.policies must contain at least one required policy.`);
+  }
+
   if (input.services?.length) errors.push('services are not supported in schema version 0.1.');
   if (input.internet && (input.internet.outbound?.length || input.internet.inbound?.length)) errors.push('internet rules are not supported in schema version 0.1.');
   return { valid: errors.length === 0, errors };
@@ -66,6 +77,12 @@ export function normalizedAssignmentSpec(input) {
     roles: input.roles.map(role => ({ id: text(role.id), name: text(role.name), deviceTypes: [...new Set(role.deviceTypes || (role.deviceType ? [role.deviceType] : []))], count: role.count })),
     relationships: (input.relationships || []).map((relationship, index) => ({ id: text(relationship.id) || `relationship-${index + 1}`, from: relationship.from, to: relationship.to, action: relationship.action, layer: relationship.layer, ...(relationship.layer === 'l3' ? { protocol: 'icmp' } : {}) })),
     constraints: (input.constraints || []).map((constraint, index) => ({ id: text(constraint.id) || `constraint-${index + 1}`, type: constraint.type, roles: constraint.roles })),
+    configuration: (input.configuration || []).map((requirement, index) => ({
+      id: text(requirement.id) || `configuration-${index + 1}`, type: requirement.type, deviceId: text(requirement.deviceId), title: text(requirement.title), description: text(requirement.description),
+      ...(requirement.type === 'routed_interfaces' ? { interfaces: structuredClone(requirement.interfaces || {}) } : {}),
+      ...(requirement.type === 'switch_vlans' ? { vlans: structuredClone(requirement.vlans || []), accessPorts: structuredClone(requirement.accessPorts || {}) } : {}),
+      ...(requirement.type === 'firewall_policies' ? { policies: structuredClone(requirement.policies || []), requireFinalDenyAll: requirement.requireFinalDenyAll !== false } : {})
+    })),
     settings: { allowExtraDevices: input.settings?.allowExtraDevices !== false, showLiveProgress: input.settings?.showLiveProgress !== false, showFailureReasons: input.settings?.showFailureReasons !== false }
   };
 }

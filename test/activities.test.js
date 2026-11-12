@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { evaluateActivityDefinition } from '../src/activities/evaluate.js';
 import { ActivityServiceError, createActivityService, installActivitySchema } from '../src/activities/service.mjs';
 import { validateActivityDefinition } from '../src/activities/spec.js';
-import { buildSwitchedLanActivity, builtInActivities, configureWorkstationIpv4Activity, connectTwoPcsActivity } from '../src/activities/builtins.mjs';
+import { basicFirewallPoliciesActivity, buildSwitchedLanActivity, builtInActivities, configureEdgeRouterActivity, configureWorkstationIpv4Activity, connectTwoPcsActivity, createManagedVlansActivity } from '../src/activities/builtins.mjs';
 
 function fixture() {
   const db = new DatabaseSync(':memory:');
@@ -158,4 +158,39 @@ test('the switched LAN activity passes only after all three endpoint links exist
   assert.equal(evaluateActivityDefinition(buildSwitchedLanActivity, document).completed, false);
   document.connections.push({ id: 'client-b-link', a: { deviceId: 'lan-client-b', portId: 'eth0' }, b: { deviceId: 'lan-switch', portId: 'eth2' } });
   assert.equal(evaluateActivityDefinition(buildSwitchedLanActivity, document).completed, true);
+});
+
+test('the edge-router activity requires both interface addresses and routed reachability', () => {
+  const document = structuredClone(configureEdgeRouterActivity.startingNetwork);
+  assert.equal(evaluateActivityDefinition(configureEdgeRouterActivity, document).completed, false);
+  document.devices.find(device => device.instanceId === 'edge-router').interfaces = { eth0: { address: '192.168.10.1', prefix: 24 }, eth1: { address: '198.51.100.1', prefix: 24 } };
+  const result = evaluateActivityDefinition(configureEdgeRouterActivity, document);
+  assert.equal(result.completed, true);
+  assert.equal(result.requirements.find(item => item.id === 'edge-interface-addressing').status, 'passed');
+});
+
+test('the managed-VLAN activity requires the named VLANs, access ports, and separation', () => {
+  const document = structuredClone(createManagedVlansActivity.startingNetwork);
+  assert.equal(evaluateActivityDefinition(createManagedVlansActivity, document).completed, false);
+  document.devices.find(device => device.instanceId === 'vlan-switch').switching = {
+    hostname: 'Switch', vlans: { 1: 'default', 10: 'Staff', 20: 'Guest' },
+    ports: { eth0: { mode: 'access', accessVlan: 10, enabled: true }, eth1: { mode: 'access', accessVlan: 20, enabled: true } }
+  };
+  const result = evaluateActivityDefinition(createManagedVlansActivity, document);
+  assert.equal(result.completed, true);
+  assert.equal(result.requirements.find(item => item.id === 'required-vlans').status, 'passed');
+});
+
+test('the firewall activity requires two ordered policies followed by explicit deny all', () => {
+  const document = structuredClone(basicFirewallPoliciesActivity.startingNetwork);
+  const firewall = document.devices.find(device => device.instanceId === 'policy-firewall');
+  firewall.firewall.policies = [
+    { sequence: 10, sourceZone: 'inside', destinationZone: 'outside', sourceAddress: 'any', destinationAddress: 'any', protocol: 'icmp', action: 'allow' },
+    { sequence: 20, sourceZone: 'outside', destinationZone: 'inside', sourceAddress: 'any', destinationAddress: 'any', protocol: 'icmp', action: 'deny' }
+  ];
+  assert.equal(evaluateActivityDefinition(basicFirewallPoliciesActivity, document).completed, false, 'two policies without final deny all must not pass');
+  firewall.firewall.policies.push({ sequence: 10000, sourceZone: 'any', destinationZone: 'any', sourceAddress: 'any', destinationAddress: 'any', protocol: 'any', action: 'deny' });
+  const result = evaluateActivityDefinition(basicFirewallPoliciesActivity, document);
+  assert.equal(result.completed, true);
+  assert.equal(result.requirements.find(item => item.id === 'ordered-firewall-policy').status, 'passed');
 });
