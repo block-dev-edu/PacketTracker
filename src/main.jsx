@@ -280,8 +280,8 @@ function loadEditorView(projectId) {
   catch { return {}; }
 }
 
-function EditorApp({ project, user, onSave, onBack, readOnly = false }) {
-  const draft = useRef(readOnly ? null : loadProjectDraft(project?.id)).current;
+function EditorApp({ project, user, onSave, onBack, readOnly = false, activity = null, onActivitySave, onActivityComplete, onActivityReset }) {
+  const draft = useRef(readOnly || activity ? null : loadProjectDraft(project?.id)).current;
   const savedEditorView = useRef(loadEditorView(project?.id)).current;
   const [activeCategory, setActiveCategory] = useState(savedEditorView.activeCategory || 'routers');
   const [query, setQuery] = useState('');
@@ -314,6 +314,10 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false }) {
   const [isPanning, setIsPanning] = useState(false);
   const [assignmentPanelOpen, setAssignmentPanelOpen] = useState(false);
   const [assignmentPanelCategory, setAssignmentPanelCategory] = useState('overview');
+  const [activityHelpOpen, setActivityHelpOpen] = useState(Boolean(activity));
+  const [activityResult, setActivityResult] = useState(null);
+  const [activityBusy, setActivityBusy] = useState(false);
+  const [activitySaveState, setActivitySaveState] = useState('saved');
   const [connections, setConnections] = useState(() => {
     if (draft?.connections) return structuredClone(draft.connections);
     if (project?.document?.connections) return structuredClone(project.document.connections);
@@ -345,6 +349,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false }) {
   const [, setHistoryRevision] = useState(0);
   const connectMode = activeTool === 'connect';
   const connectionActive = connectMode || Boolean(pendingPort) || Boolean(portPicker);
+  const activitySaveRef = useRef(onActivitySave);
+  useEffect(() => { activitySaveRef.current = onActivitySave; }, [onActivitySave]);
 
   useEffect(() => {
     if (canvasInitializedRef.current || !canvasRef.current) return;
@@ -403,6 +409,17 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false }) {
     if (readOnly || !project?.id) return;
     localStorage.setItem(projectDraftKey(project.id), JSON.stringify({ version: 2, updatedAt: Date.now(), devices: serializeDesign(placed), connections, notes, segments }));
   }, [placed, connections, notes, segments, project?.id, readOnly]);
+
+  useEffect(() => {
+    if (!activity || readOnly || !activitySaveRef.current) return undefined;
+    setActivitySaveState('saving');
+    const timer = setTimeout(() => {
+      activitySaveRef.current({ version: 2, devices: serializeDesign(placed), connections, notes, segments })
+        .then(() => setActivitySaveState('saved'))
+        .catch(() => setActivitySaveState('error'));
+    }, 650);
+    return () => clearTimeout(timer);
+  }, [activity?.attempt?.id, placed, connections, notes, segments, readOnly]);
   useEffect(() => localStorage.setItem('packettracker-inspector-width', String(inspectorWidth)), [inspectorWidth]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1016,6 +1033,24 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false }) {
     } else setToast('Design saved locally');
   }
 
+  async function completeActivity() {
+    if (!onActivityComplete || activityBusy) return;
+    setActivityBusy(true); setActivityResult(null);
+    try {
+      const result = await onActivityComplete({ version: 2, devices: serializeDesign(placed), connections, notes, segments });
+      setActivityResult(result);
+      if (result.evaluation?.completed) localStorage.removeItem(projectDraftKey(project.id));
+    } catch (error) { setToast(error.message || 'Could not check the activity'); }
+    finally { setActivityBusy(false); }
+  }
+
+  async function resetActivity() {
+    if (!onActivityReset || activityBusy || !window.confirm('Reset this activity? Your current activity work will be discarded and replaced with a fresh starting network.')) return;
+    setActivityBusy(true);
+    try { await onActivityReset(); }
+    catch (error) { setToast(error.message || 'Could not reset the activity'); setActivityBusy(false); }
+  }
+
   function exportDesign() {
     const blob = new Blob([JSON.stringify({ version: 2, name: 'Untitled Network', devices: serializeDesign(placed), connections, notes, segments }, null, 2)], { type: 'application/json' });
     const link = document.createElement('a');
@@ -1029,14 +1064,15 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false }) {
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand editor-brand"><img className="editor-brand-logo" src="/packettracker-logo-with-text.png" alt="PacketTracker"/></div>
-      <div className="project-header-nav"><span className="file-name">{project?.name || 'Untitled Network'}</span><button className="back-to-projects" onClick={onBack}>Back to projects</button></div>
+      <div className="project-header-nav"><span className="file-name">{project?.name || 'Untitled Network'}</span><button className="back-to-projects" onClick={onBack}>{activity ? 'Back to skills' : 'Back to projects'}</button></div>
       <div className="top-actions">
+        {activity && <><span className={`activity-save-state ${activitySaveState}`}>{activitySaveState === 'saving' ? 'Saving…' : activitySaveState === 'error' ? 'Save failed' : 'Progress saved'}</span><button className="button secondary" disabled={activityBusy} onClick={resetActivity}><RotateCcw size={16}/> Reset activity</button><button className="button secondary" onClick={() => setActivityHelpOpen(true)}><CircleHelp size={16}/> Instructions</button><button className="button primary activity-complete-button" disabled={activityBusy} onClick={completeActivity}><GraduationCap size={16}/>{activityBusy ? 'Working…' : 'Check & complete'}</button></>}
         {assignmentSpec && <button className={`assignment-summary-button ${assignmentProgress}`} style={{ '--challenge-progress': `${assignmentPercent}%` }} onClick={() => setAssignmentPanelOpen(true)}><FilePlus2 size={17}/><span>Show challenge</span><small>{assignmentPassed} of {assignmentTotal} complete</small></button>}
         <button className="icon-button" title="Undo (Ctrl+Z)" disabled={!historyRef.current.past.length && !pendingHistoryRef.current} onClick={undoDesign}><Undo2 size={17}/></button>
         <button className="icon-button" title="Redo (Ctrl+Y)" disabled={!historyRef.current.future.length} onClick={redoDesign}><Redo2 size={17}/></button>
         <div className="divider" />
         <button className="button secondary" onClick={exportDesign}><Download size={16}/> Export</button>
-        <button className="button primary" disabled={readOnly} title={readOnly ? 'Shared projects are read-only' : 'Save project'} onClick={saveDesign}><Save size={16}/> {readOnly ? 'Read only' : 'Save project'}</button>
+        {!activity && <button className="button primary" disabled={readOnly} title={readOnly ? 'Shared projects are read-only' : 'Save project'} onClick={saveDesign}><Save size={16}/> {readOnly ? 'Read only' : 'Save project'}</button>}
         <div className="profile-wrap">
           <button className="avatar" onClick={() => setProfileOpen(value => !value)} aria-expanded={profileOpen} aria-label="Open profile settings">{user?.name?.split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase() || 'PT'}</button>
           {profileOpen && <div className="profile-menu">
@@ -1091,6 +1127,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false }) {
       {!sidebarOpen && <button className="sidebar-opener" onClick={() => setSidebarOpen(true)}><PanelLeftOpen size={18}/></button>}
 
       <section className="canvas-wrap">
+        {activity && activityHelpOpen && <ActivityInstructionsModal activity={activity} onUseHint={async hintId => { await onActivitySave?.({ version: 2, devices: serializeDesign(placed), connections, notes, segments }, { hintIds: [hintId] }); }} onClose={() => setActivityHelpOpen(false)}/>}
+        {activityResult && <ActivityResultModal result={activityResult} level={activity.attempt.requestedLevel} onClose={() => setActivityResult(null)} onBack={onBack}/>}
         {assignmentSpec && assignmentPanelOpen && <AssignmentChallengeModal spec={assignmentSpec} evaluation={assignmentEvaluation} devices={placed} activeCategory={assignmentPanelCategory} onCategoryChange={setAssignmentPanelCategory} onClose={() => setAssignmentPanelOpen(false)}/>}
         <div className="canvas-toolbar">
           <button className={`tool ${activeTool === 'select' ? 'active' : ''}`} onClick={() => setTool('select')}><MousePointer2 size={17}/><span>Select</span></button>
@@ -1949,6 +1987,34 @@ function PlacedDevice({ item, selected, pingSource, ipConflicts, interactionMode
   </div>;
 }
 
+function levelLabel(level) { return level === 'assisted' ? 'Hinted' : level ? `${level[0].toUpperCase()}${level.slice(1)}` : ''; }
+
+function ActivityInstructionsModal({ activity, onUseHint, onClose }) {
+  const instruction = activity.definition.instructions[activity.attempt.requestedLevel] || {};
+  const [revealed, setRevealed] = useState([]);
+  return <div className="activity-modal-backdrop" onPointerDown={onClose}>
+    <section className="activity-instructions-modal" role="dialog" aria-modal="true" aria-labelledby="activity-instructions-title" onPointerDown={event => event.stopPropagation()}>
+      <header><div><span>{levelLabel(activity.attempt.requestedLevel)} level</span><h2 id="activity-instructions-title">{activity.definition.title}</h2></div><button className="icon-button" onClick={onClose}><X size={18}/></button></header>
+      <div className="activity-instructions-body"><p className="activity-summary">{instruction.summary}</p>
+        {!!instruction.objectives?.length && <section><h3>What you need to accomplish</h3><ul>{instruction.objectives.map(objective => <li key={objective}>{objective}</li>)}</ul></section>}
+        {!!instruction.steps?.length && <section><h3>Steps</h3><ol>{instruction.steps.map(step => <li key={step}>{step}</li>)}</ol></section>}
+        {!!instruction.hints?.length && <section><h3>Hints</h3><div className="activity-hints">{instruction.hints.map((hint, index) => revealed.includes(index) ? <p key={hint}>{hint}</p> : <button key={hint} onClick={() => { setRevealed(current => [...current, index]); onUseHint?.(`hint-${index + 1}`); }}>Reveal hint {index + 1}</button>)}</div></section>}
+      </div><footer><button className="button primary" onClick={onClose}>Continue activity</button></footer>
+    </section>
+  </div>;
+}
+
+function ActivityResultModal({ result, level, onClose, onBack }) {
+  const passed = result.evaluation?.completed;
+  return <div className="activity-modal-backdrop"><section className={`activity-result-modal ${passed ? 'passed' : 'incomplete'}`} role="dialog" aria-modal="true">
+    <div className="activity-result-icon">{passed ? <GraduationCap size={34}/> : <CircleHelp size={34}/>}</div>
+    <h2>{passed ? 'Skill completed' : 'Not quite yet'}</h2>
+    <p>{passed ? `You completed this activity at the ${levelLabel(result.attempt.awardedLevel || level)} level.` : 'Your work is saved. Review the challenge status, make another change, and check again.'}</p>
+    {!passed && result.evaluation?.requirements?.filter(item => item.status !== 'passed').map(item => <small key={item.id}>{item.reason || item.checks?.find(check => check.status !== 'passed')?.reason || 'A network requirement is not complete.'}</small>)}
+    <div>{!passed && <button className="button secondary" onClick={onClose}>Keep working</button>}{passed && <button className="button primary" onClick={onBack}>Return to skills</button>}</div>
+  </section></div>;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
   const body = response.status === 204 ? null : await response.json().catch(() => null);
@@ -1956,10 +2022,20 @@ async function api(path, options = {}) {
   return body;
 }
 
+function prepareActivityDocument(definition, document) {
+  const prepared = structuredClone(document || definition.startingNetwork);
+  if (definition.key === 'connect-two-pcs' && prepared.devices?.some(device => Number(device.x) > 1500)) {
+    prepared.devices = prepared.devices.map(device => ({ ...device, x: Number(device.x) - 2020, y: Number(device.y) - 1720 }));
+    return { document: prepared, changed: true };
+  }
+  return { document: prepared, changed: false };
+}
+
 function PlatformApp() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [project, setProject] = useState(null);
+  const [activeActivity, setActiveActivity] = useState(null);
   const [dashboardRevision, setDashboardRevision] = useState(0);
   const [dashboardTab, setDashboardTab] = useState('classes');
 
@@ -1971,8 +2047,22 @@ function PlatformApp() {
       try { view = JSON.parse(localStorage.getItem(`packettracker-view-${result.user.id}`) || 'null'); } catch { /* use dashboard */ }
       if (view?.tab) setDashboardTab(view.tab);
       else setDashboardTab(result.user.role === 'student' ? 'projects' : 'classes');
-      if (view?.page === 'project' && view.projectId) {
-        try { setProject(await api(`/api/projects/${view.projectId}`)); }
+      if (view?.page === 'activity' && view.attemptId) {
+        try {
+          let [attempt, activityRecord] = await Promise.all([api(`/api/skill-attempts/${view.attemptId}`), api(`/api/skill-activities/${view.activityId}`)]);
+          const prepared = prepareActivityDocument(activityRecord.definition, attempt.workingDocument);
+          if (prepared.changed && attempt.status === 'in_progress') attempt = await api(`/api/skill-attempts/${attempt.id}`, { method: 'PUT', body: JSON.stringify({ document: prepared.document }) });
+          setActiveActivity({ attempt, definition: activityRecord.definition, activityId: activityRecord.id });
+          setProject({ id: `skill-attempt-${attempt.id}`, owner_id: result.user.id, name: activityRecord.definition.title, document: prepared.changed ? prepared.document : attempt.workingDocument, assignment: { specification: activityRecord.definition.requirements.specification }, isSkillActivity: true });
+        } catch { localStorage.removeItem(`packettracker-view-${result.user.id}`); }
+      } else if (view?.page === 'project' && view.projectId) {
+        try {
+          if (view.preview) {
+            const preview = JSON.parse(localStorage.getItem(`packettracker-assignment-preview-${result.user.id}`) || 'null');
+            if (!preview || preview.id !== view.projectId) throw new Error('Preview not found');
+            setProject(preview);
+          } else setProject(await api(`/api/projects/${view.projectId}`));
+        }
         catch { localStorage.removeItem(`packettracker-view-${result.user.id}`); }
       }
     }).catch(() => setUser(null)).finally(() => setLoading(false));
@@ -1984,18 +2074,70 @@ function PlatformApp() {
     localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'project', projectId: id, tab: 'projects' }));
   }
 
+  function openAssignmentPreview(assignment) {
+    const preview = {
+      id: `assignment-preview-${assignment.id}-${Date.now()}`,
+      owner_id: user.id,
+      name: assignment.title,
+      document: { version: 2, devices: [], connections: [], notes: [], segments: [] },
+      assignment: { id: assignment.id, title: assignment.title, specification: assignment.specification },
+      isAssignmentPreview: true,
+      savedProjectId: assignment.project_id || null
+    };
+    localStorage.setItem(`packettracker-assignment-preview-${user.id}`, JSON.stringify(preview));
+    localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'project', projectId: preview.id, preview: true, tab: 'assignments' }));
+    setProject(preview);
+  }
+
   function showDashboardTab(tab) {
     setDashboardTab(tab);
     if (user) localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'dashboard', tab }));
   }
 
+  async function openSkillActivity(activityRecord, level = null, replaceOpen = false) {
+    let attempt = (await api(`/api/skill-activities/${activityRecord.id}/open-attempt`)).attempt;
+    if (level && attempt) {
+      if (!replaceOpen && !window.confirm(`Starting ${levelLabel(level)} will discard your current in-progress attempt. Continue?`)) return;
+      await api(`/api/skill-attempts/${attempt.id}/abandon`, { method: 'POST' });
+      attempt = null;
+    }
+    if (!attempt) attempt = await api(`/api/skill-activities/${activityRecord.id}/attempts`, { method: 'POST', body: JSON.stringify({ level: level || activityRecord.definition.supportedLevels[0] }) });
+    const prepared = prepareActivityDocument(activityRecord.definition, attempt.workingDocument);
+    if (prepared.changed) attempt = await api(`/api/skill-attempts/${attempt.id}`, { method: 'PUT', body: JSON.stringify({ document: prepared.document }) });
+    const activityState = { attempt, definition: activityRecord.definition, activityId: activityRecord.id };
+    setActiveActivity(activityState);
+    setProject({ id: `skill-attempt-${attempt.id}`, owner_id: user.id, name: activityRecord.definition.title, document: prepared.changed ? prepared.document : attempt.workingDocument, assignment: { specification: activityRecord.definition.requirements.specification }, isSkillActivity: true });
+    localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'activity', activityId: activityRecord.id, attemptId: attempt.id, tab: 'skills' }));
+  }
+
   if (loading) return <div className="platform-loading"><div className="brand-mark"><img src="/packettrackerfavicon.png" alt=""/></div><span>Loading PacketTracker…</span></div>;
   if (!user) return <AuthScreen onAuthenticated={authenticatedUser => { setDashboardTab(authenticatedUser.role === 'student' ? 'projects' : 'classes'); setUser(authenticatedUser); }}/>;
-  if (project) return <EditorApp key={project.id} project={project} user={user} readOnly={project.owner_id !== user.id} onBack={() => { showDashboardTab('projects'); setProject(null); setDashboardRevision(value => value + 1); }} onSave={project.owner_id === user.id ? async document => {
+  if (project) return <EditorApp key={project.id} project={project} user={user} activity={activeActivity} readOnly={project.owner_id !== user.id} onBack={() => { showDashboardTab(project.isSkillActivity ? 'skills' : project.isAssignmentPreview ? 'assignments' : 'projects'); setProject(null); setActiveActivity(null); setDashboardRevision(value => value + 1); }} onActivityReset={activeActivity ? async () => {
+    await openSkillActivity({ id: activeActivity.activityId, definition: activeActivity.definition }, activeActivity.attempt.requestedLevel, true);
+  } : null} onActivitySave={activeActivity ? async (document, updates = {}) => {
+    const saved = await api(`/api/skill-attempts/${activeActivity.attempt.id}`, { method: 'PUT', body: JSON.stringify({ document, ...updates }) });
+    setActiveActivity(current => current ? { ...current, attempt: saved } : current);
+    return saved;
+  } : null} onActivityComplete={activeActivity ? async document => {
+    await api(`/api/skill-attempts/${activeActivity.attempt.id}`, { method: 'PUT', body: JSON.stringify({ document }) });
+    const result = await api(`/api/skill-attempts/${activeActivity.attempt.id}/complete`, { method: 'POST' });
+    setActiveActivity(current => current ? { ...current, attempt: result.attempt } : current);
+    return result;
+  } : null} onSave={project.owner_id === user.id ? async document => {
+    if (project.isAssignmentPreview) {
+      const overwrite = Boolean(project.savedProjectId);
+      if (overwrite && !window.confirm('This assignment already has a saved example. Saving this preview will replace the previous example. Continue?')) throw new Error('Save cancelled — the previous example was not changed.');
+      const saved = await api(`/api/assignments/${project.assignment.id}/example`, { method: 'PUT', body: JSON.stringify({ document, overwrite }) });
+      localStorage.removeItem(`packettracker-assignment-preview-${user.id}`);
+      localStorage.removeItem(projectDraftKey(project.id));
+      localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'project', projectId: saved.id, tab: 'assignments' }));
+      setProject(saved);
+      return;
+    }
     const saved = await api(`/api/projects/${project.id}`, { method: 'PUT', body: JSON.stringify({ name: project.name, document }) });
     setProject(current => ({ ...current, ...saved }));
   } : null}/>;
-  return <Dashboard key={dashboardRevision} user={user} initialTab={dashboardTab} onTabChange={showDashboardTab} onOpenProject={openProject} onLogout={async () => { localStorage.removeItem(`packettracker-view-${user.id}`); await api('/api/auth/logout', { method: 'POST' }); setUser(null); }}/>
+  return <Dashboard key={dashboardRevision} user={user} initialTab={dashboardTab} onTabChange={showDashboardTab} onOpenProject={openProject} onOpenSkillActivity={openSkillActivity} onPreviewAssignment={openAssignmentPreview} onLogout={async () => { localStorage.removeItem(`packettracker-view-${user.id}`); await api('/api/auth/logout', { method: 'POST' }); setUser(null); }}/>
 }
 
 function AuthScreen({ onAuthenticated }) {
@@ -2099,8 +2241,36 @@ function NetworkConstellationBackground() {
   return <canvas ref={canvasRef} className="network-constellation" aria-hidden="true"/>;
 }
 
-function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, onLogout }) {
-  const [data, setData] = useState({ classes: [], projects: [], sharedProjects: [], assignments: [] });
+function completedSkillDetails(student) {
+  const byActivity = new Map((student.progress || []).map(skill => [skill.activityId, { activityId: skill.activityId, title: skill.title, highestLevel: skill.highestLevel, completedLevels: [skill.highestLevel] }]));
+  for (const skill of student.skillBreakdown || []) {
+    const progress = byActivity.get(skill.activityId);
+    const highestLevel = skill.highestLevel || skill.completedLevels?.at(-1) || progress?.highestLevel || null;
+    const completedLevels = skill.completedLevels?.length ? skill.completedLevels : progress?.completedLevels || (highestLevel ? [highestLevel] : []);
+    if (highestLevel) byActivity.set(skill.activityId, { activityId: skill.activityId, title: skill.title || progress?.title || 'Skill activity', highestLevel, completedLevels });
+  }
+  return [...byActivity.values()].filter(skill => skill.highestLevel);
+}
+
+function TeacherClassCard({ course, students, expanded, onToggle, onPresentCode, onManageCode }) {
+  return <article className={`teacher-class-card ${expanded ? 'expanded' : ''}`}>
+    <div className="teacher-class-summary"><button className="class-expand-button" onClick={onToggle} aria-expanded={expanded}>{expanded ? <ChevronDown size={18}/> : <ChevronRight size={18}/>}<span><strong>{course.name}</strong><small>{course.student_count} student{course.student_count === 1 ? '' : 's'}</small></span></button><div className="class-code-controls">{course.join_code_active ? <><button className="join-code-button" onClick={() => onPresentCode({ code: course.join_code, className: course.name })} title="Display join code"><code>{course.join_code}</code></button><button onClick={() => onManageCode(course.id, 'regenerate')} title="Generate a different join code"><RotateCcw size={14}/>Change</button><button className="disable-code" onClick={() => onManageCode(course.id, 'disable')} title="Stop students from using this code"><X size={14}/>Disable</button></> : <><span>Join code disabled</span><button onClick={() => onManageCode(course.id, 'regenerate')}><RotateCcw size={14}/>Create code</button></>}</div></div>
+    {expanded && <div className="class-student-roster">{students.map(student => { const totals = student.totals || { total: 0, completed: 0, guided: 0, assisted: 0, independent: 0, incomplete: 0 }, completedSkills = completedSkillDetails(student); return <section className="student-skill-row" key={student.id}><div className="student-skill-heading"><span><strong>{student.name}</strong><small>{student.email}</small></span><b>{totals.completed} / {totals.total} skills</b></div><div className="student-progress-bar aggregate" tabIndex="0" aria-label={`${student.name}: ${totals.guided} guided, ${totals.assisted} hinted, ${totals.independent} independent, ${totals.incomplete} incomplete`}>{totals.total ? <>{totals.guided > 0 && <i className="guided" style={{ flex: totals.guided }}/>} {totals.assisted > 0 && <i className="assisted" style={{ flex: totals.assisted }}/>} {totals.independent > 0 && <i className="independent" style={{ flex: totals.independent }}/>} {totals.incomplete > 0 && <i className="incomplete" style={{ flex: totals.incomplete }}/>}</> : <i className="incomplete" style={{ flex: 1 }}/>}<div className="student-graph-tooltip"><header><strong>{student.name}</strong><span>{totals.completed} of {totals.total} skills completed</span></header><div>{completedSkills.map(skill => <p key={skill.activityId}><i className={skill.highestLevel}/><span>{skill.title}</span><b className="skill-tooltip-levels">{skill.completedLevels.map(level => <small key={level} className={level}>{levelLabel(level)}</small>)}</b></p>)}{!completedSkills.length && <em>No skills completed yet.</em>}</div></div></div></section>; })}{!students.length && <p>No students have joined this class yet.</p>}</div>}
+  </article>;
+}
+
+function SkillActivityCard({ item, progress, attempts, onStart }) {
+  const completedLevels = new Set((attempts || []).filter(attempt => attempt.status === 'completed').map(attempt => attempt.awardedLevel));
+  const openAttempt = (attempts || []).find(attempt => attempt.status === 'in_progress');
+  const levelButton = level => {
+    const completed = completedLevels.has(level);
+    return item.definition.supportedLevels.includes(level) && <button key={level} className={`button secondary skill-start-button ${completed ? 'completed' : ''}`} onClick={() => onStart(item, level)}>{completed ? `${levelLabel(level)} Completed` : `Start ${levelLabel(level)}`}</button>;
+  };
+  return <article className="skill-activity-card"><div className="skill-card-heading"><span>{item.definition.category}</span><strong>{item.definition.title}</strong><p>{item.definition.description}</p><div>{item.definition.skills.map(skill => <small key={skill}>{skill.replaceAll('-', ' ')}</small>)}</div></div><div className="skill-card-actions">{openAttempt && <span className="skill-in-progress"><RotateCcw size={13}/>{levelLabel(openAttempt.requestedLevel)} in progress</span>}{progress && <span className={`skill-level-badge ${progress.highestLevel}`}><GraduationCap size={14}/>Highest proficiency: {levelLabel(progress.highestLevel)}</span>}<div className="skill-start-buttons">{openAttempt && <button className="button skill-resume-button" onClick={() => onStart(item)}>Resume {levelLabel(openAttempt.requestedLevel)}</button>}{levelButton('guided')}{levelButton('assisted')}{levelButton('independent')}</div></div></article>;
+}
+
+function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, onOpenSkillActivity, onPreviewAssignment, onLogout }) {
+  const [data, setData] = useState({ classes: [], classStudents: [], projects: [], sharedProjects: [], assignments: [], activities: [], skillProgress: [], skillTotals: null, activityAttempts: {} });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [newClass, setNewClass] = useState('');
@@ -2117,8 +2287,20 @@ function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, o
   const [assignmentClassTarget, setAssignmentClassTarget] = useState(null);
   const [selectedAssignmentClasses, setSelectedAssignmentClasses] = useState([]);
   const [assignmentPromptCopied, setAssignmentPromptCopied] = useState(false);
+  const [expandedClasses, setExpandedClasses] = useState([]);
+  const [skillCategory, setSkillCategory] = useState('all');
+  const classRosterInitializedRef = useRef(false);
 
-  const refresh = () => api('/api/dashboard').then(setData).catch(requestError => setError(requestError.message)).finally(() => setLoading(false));
+  const refresh = async () => {
+    try {
+      const [dashboard, library, progress] = await Promise.all([api('/api/dashboard'), api('/api/skill-activities'), ...(user.role === 'student' ? [api('/api/skill-progress')] : [])]);
+      const activities = library.activities || [], activityAttempts = {};
+      if (user.role === 'student') await Promise.all(activities.map(async item => { activityAttempts[item.id] = (await api(`/api/skill-activities/${item.id}/attempts`)).attempts || []; }));
+      setData({ ...dashboard, activities, skillProgress: progress?.progress || [], skillTotals: progress?.totals || null, activityAttempts });
+      if (user.role === 'teacher' && !classRosterInitializedRef.current) { setExpandedClasses((dashboard.classes || []).map(course => course.id)); classRosterInitializedRef.current = true; }
+    } catch (requestError) { setError(requestError.message); }
+    finally { setLoading(false); }
+  };
   useEffect(() => { refresh(); }, []);
   useEffect(() => {
     if (!classModalOpen) return undefined;
@@ -2173,17 +2355,29 @@ function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, o
   }
 
   const classesPanel = <section className="dashboard-panel classes-panel"><div className="dashboard-panel-title"><div><Users size={18}/><span><strong>{user.role === 'teacher' ? 'Classes' : 'My class'}</strong><small>{user.role === 'teacher' ? `${data.classes.length} owned` : data.classes.length ? 'Your enrolled class' : 'Not enrolled yet'}</small></span></div>{user.role === 'teacher' && <button className="panel-add-button" onClick={() => setClassModalOpen(true)} aria-label="Create a class" title="Create a class"><Plus size={23}/></button>}</div>
+    {user.role === 'teacher' && <div className="skill-progress-legend"><span><i className="guided"/>Guided</span><span><i className="assisted"/>Hinted</span><span><i className="independent"/>Independent</span><span><i className="incomplete"/>Incomplete</span></div>}
     {user.role === 'student' && data.classes.length === 0 && <form className="inline-create" onSubmit={joinClass}><input required value={joinCodeValue} onChange={event => setJoinCodeValue(event.target.value)} placeholder="Enter class code"/><button className="button primary">Join</button></form>}
-    <div className="class-list">{data.classes.map(course => <article key={course.id}><div><strong>{course.name}</strong><small>{user.role === 'teacher' ? `${course.student_count} students` : `Teacher: ${course.teacher_name}`}</small></div>{user.role === 'teacher' && <div className="class-code-controls">{course.join_code_active ? <><button className="join-code-button" onClick={() => setPresentedJoinCode({ code: course.join_code, className: course.name })} title="Display join code"><code>{course.join_code}</code></button><button onClick={() => manageJoinCode(course.id, 'regenerate')} title="Generate a different join code"><RotateCcw size={14}/>Change</button><button className="disable-code" onClick={() => manageJoinCode(course.id, 'disable')} title="Stop students from using this code"><X size={14}/>Disable</button></> : <><span>Join code disabled</span><button onClick={() => manageJoinCode(course.id, 'regenerate')}><RotateCcw size={14}/>Create code</button></>}</div>}</article>)}{!data.classes.length && <p>No classes yet.</p>}</div>
+    <div className="class-list">{data.classes.map(course => user.role === 'teacher' ? <TeacherClassCard key={course.id} course={course} students={data.classStudents.filter(student => student.class_id === course.id)} expanded={expandedClasses.includes(course.id)} onToggle={() => setExpandedClasses(current => current.includes(course.id) ? current.filter(id => id !== course.id) : [...current, course.id])} onPresentCode={setPresentedJoinCode} onManageCode={manageJoinCode}/> : <article key={course.id}><div><strong>{course.name}</strong><small>Teacher: {course.teacher_name}</small></div></article>)}{!data.classes.length && <p>No classes yet.</p>}</div>
   </section>;
   const projectsPanel = <section className="dashboard-panel projects-panel"><div className="dashboard-panel-title"><div><FolderOpen size={18}/><span><strong>My projects</strong><small>{data.projects.length} saved projects</small></span></div><button className="panel-add-button" onClick={() => setProjectModalOpen(true)} aria-label="Create a project" title="Create a project"><Plus size={23}/></button></div>
     <div className="project-list">{data.projects.map(item => <article key={item.id}><button className="project-open" onClick={() => onOpenProject(item.id)}><span className="project-icon"><Network size={18}/></span><span><strong>{item.name}</strong><small>Updated {new Date(item.updated_at).toLocaleString()}</small></span></button><div>{user.role === 'student' && data.classes.length > 0 && <button title="Share with teacher" onClick={() => shareProject(item.id, data.classes[0].id)}><Share2 size={14}/>{item.shared ? 'Shared' : 'Share'}</button>}<button className="danger-link" onClick={() => removeProject(item.id)}><Trash2 size={14}/></button></div></article>)}{!data.projects.length && <p>Create your first network project.</p>}</div>
   </section>;
   const sharedPanel = <section className="dashboard-panel shared-panel"><div className="dashboard-panel-title"><div><Share2 size={18}/><span><strong>Shared with me</strong><small>Student projects for review</small></span></div></div><div className="project-list">{data.sharedProjects.map(item => <article key={item.id}><button className="project-open" onClick={() => onOpenProject(item.id)}><span className="project-icon"><Network size={18}/></span><span><strong>{item.name}</strong><small>{item.owner_name}{item.class_name ? ` · ${item.class_name}` : ''}</small></span></button></article>)}{!data.sharedProjects.length && <p>No student projects have been shared yet.</p>}</div></section>;
   const assignmentsPanel = <section className="dashboard-panel assignments-panel"><div className="dashboard-panel-title"><div><FilePlus2 size={18}/><span><strong>Assignments</strong><small>{data.assignments.length} available</small></span></div>{user.role === 'teacher' && <button className="panel-add-button" onClick={() => setAssignmentModalOpen(true)} aria-label="Create assignment" title="Create assignment from JSON"><Plus size={23}/></button>}</div>
-    <div className="assignment-list">{data.assignments.map(assignment => <article key={assignment.id}><div><span>{assignment.classNames?.length ? assignment.classNames.join(' · ') : user.role === 'teacher' ? 'Not assigned' : 'Assignment'}</span><strong>{assignment.title}</strong><p>{assignmentDescription(assignment.specification.scenario.description)}</p><small>{assignment.specification.roles.length} roles · {assignment.specification.relationships.length} reachability checks</small></div>{user.role === 'student' ? <button className="button primary" onClick={() => startAssignment(assignment)}>{assignment.project_id ? 'Open project' : 'Start assignment'}</button> : <div className="assignment-actions"><button className="button secondary" onClick={() => startAssignment(assignment)}>{assignment.project_id ? 'Open preview' : 'Test assignment'}</button><button className="button primary" onClick={() => { setAssignmentClassTarget(assignment); setSelectedAssignmentClasses(assignment.classIds || []); }}>Assign to classes</button><small>{assignment.student_projects} student project{assignment.student_projects === 1 ? '' : 's'}</small></div>}</article>)}{!data.assignments.length && <p>{user.role === 'teacher' ? 'Create an assignment from JSON, test it privately, then assign it to one or more classes.' : 'Your teacher has not published any assignments yet.'}</p>}</div>
+    <div className="assignment-list">{data.assignments.map(assignment => <article key={assignment.id}><div><span>{assignment.classNames?.length ? assignment.classNames.join(' · ') : user.role === 'teacher' ? 'Not assigned' : 'Assignment'}</span><strong>{assignment.title}</strong><p>{assignmentDescription(assignment.specification.scenario.description)}</p><small>{assignment.specification.roles.length} roles · {assignment.specification.relationships.length} reachability checks</small></div>{user.role === 'student' ? <button className="button primary" onClick={() => startAssignment(assignment)}>{assignment.project_id ? 'Open project' : 'Start assignment'}</button> : <div className="assignment-actions"><button className="button secondary" onClick={() => onPreviewAssignment(assignment)}>Open preview</button>{assignment.project_id && <button className="button secondary saved-example-button" onClick={() => onOpenProject(assignment.project_id)}>Open saved</button>}<button className="button primary" onClick={() => { setAssignmentClassTarget(assignment); setSelectedAssignmentClasses(assignment.classIds || []); }}>Assign to classes</button><small>{assignment.student_projects} student project{assignment.student_projects === 1 ? '' : 's'}</small></div>}</article>)}{!data.assignments.length && <p>{user.role === 'teacher' ? 'Create an assignment from JSON, test it privately, then assign it to one or more classes.' : 'Your teacher has not published any assignments yet.'}</p>}</div>
   </section>;
-  const dashboardPanels = { classes: classesPanel, projects: projectsPanel, shared: sharedPanel, assignments: assignmentsPanel };
+  const skillCategories = [...new Set(data.activities.map(item => item.definition.category))].sort();
+  const completedActivityIds = new Set(data.skillProgress.map(item => item.activityId));
+  const incompleteActivities = data.activities.filter(item => !completedActivityIds.has(item.id));
+  const visibleActivities = skillCategory === 'incomplete' ? incompleteActivities : skillCategory === 'all' ? data.activities : data.activities.filter(item => item.definition.category === skillCategory);
+  const visibleSkillCategories = [...new Set(visibleActivities.map(item => item.definition.category))].sort();
+  const totals = data.skillTotals || { total: data.activities.length, completed: 0, guided: 0, assisted: 0, independent: 0, incomplete: data.activities.length };
+  const skillsPanel = <section className="dashboard-panel skills-panel"><div className="dashboard-panel-title"><div><GraduationCap size={18}/><span><strong>Skills Library</strong><small>{totals.completed} of {totals.total} skills completed</small></span></div></div>
+    <div className="skill-library-overview"><div><span><strong>Overall proficiency</strong><small>Each skill is counted at your highest completed level.</small></span><b>{totals.completed} / {totals.total}</b></div><div className="skill-library-progress" aria-label={`${totals.guided} guided, ${totals.assisted} hinted, ${totals.independent} independent, ${totals.incomplete} incomplete`}>{totals.total ? <>{totals.guided > 0 && <i className="guided" style={{ flex: totals.guided }}/>} {totals.assisted > 0 && <i className="assisted" style={{ flex: totals.assisted }}/>} {totals.independent > 0 && <i className="independent" style={{ flex: totals.independent }}/>} {totals.incomplete > 0 && <i className="incomplete" style={{ flex: totals.incomplete }}/>}</> : <i className="incomplete" style={{ flex: 1 }}/>}</div><div className="skill-library-legend"><span><i className="guided"/>Guided</span><span><i className="assisted"/>Hinted</span><span><i className="independent"/>Independent</span><span><i className="incomplete"/>Incomplete</span></div></div>
+    <nav className="skill-category-filters" aria-label="Skill categories"><button className={skillCategory === 'all' ? 'active' : ''} onClick={() => setSkillCategory('all')}>All skills <small>{data.activities.length}</small></button><button className={skillCategory === 'incomplete' ? 'active incomplete-filter' : 'incomplete-filter'} onClick={() => setSkillCategory('incomplete')}>Incomplete <small>{incompleteActivities.length}</small></button>{skillCategories.map(category => <button key={category} className={skillCategory === category ? 'active' : ''} onClick={() => setSkillCategory(category)}>{category}<small>{data.activities.filter(item => item.definition.category === category).length}</small></button>)}</nav>
+    <div className="skill-activity-list">{visibleSkillCategories.map(category => { const categoryActivities = visibleActivities.filter(item => item.definition.category === category); return <React.Fragment key={category}><div className="skill-category-heading"><strong>{category}</strong><span>{categoryActivities.length} skill{categoryActivities.length === 1 ? '' : 's'}</span></div>{categoryActivities.map(item => <SkillActivityCard key={item.id} item={item} progress={data.skillProgress.find(entry => entry.activityId === item.id)} attempts={data.activityAttempts[item.id] || []} onStart={onOpenSkillActivity}/>)}</React.Fragment>; })}{!visibleActivities.length && <p>{skillCategory === 'incomplete' ? 'You have completed every available skill.' : 'No skill activities are available in this category.'}</p>}</div>
+  </section>;
+  const dashboardPanels = { classes: classesPanel, projects: projectsPanel, shared: sharedPanel, assignments: assignmentsPanel, skills: skillsPanel };
   const selectDashboardTab = tab => { setTeacherTab(tab); onTabChange?.(tab); };
 
   return <div className={`dashboard-shell ${user.role === 'teacher' ? 'teacher-dashboard' : 'student-dashboard'}`}><NetworkConstellationBackground/><header className="dashboard-topbar"><div className="brand"><div className="brand-mark"><img src="/packettrackerfavicon.png" alt=""/></div><span>Packet<span>Tracker</span></span></div><div><span>{user.name}</span><small>{user.role}</small><button className="icon-button" title="Sign out" onClick={onLogout}><LogOut size={17}/></button></div></header>
@@ -2191,6 +2385,7 @@ function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, o
       {error && <div className="form-error">{error}</div>}{loading ? <div className="dashboard-loading">Loading your workspace…</div> : <div className="teacher-workspace">
         <nav className="teacher-tabs" aria-label={`${user.role === 'teacher' ? 'Teacher' : 'Student'} workspace sections`}>
           {user.role === 'student' && <button className={teacherTab === 'projects' ? 'active' : ''} onClick={() => selectDashboardTab('projects')}><FolderOpen size={18}/><span>Projects</span><small>{data.projects.length}</small></button>}
+          {user.role === 'student' && <button className={teacherTab === 'skills' ? 'active' : ''} onClick={() => selectDashboardTab('skills')}><GraduationCap size={18}/><span>Skills</span><small>{data.activities.length}</small></button>}
           {user.role === 'student' && <button className={teacherTab === 'assignments' ? 'active' : ''} onClick={() => selectDashboardTab('assignments')}><FilePlus2 size={18}/><span>Assignments</span><small>{data.assignments.length}</small></button>}
           <button className={teacherTab === 'classes' ? 'active' : ''} onClick={() => selectDashboardTab('classes')}><Users size={18}/><span>{user.role === 'teacher' ? 'Classes' : 'Class Info'}</span><small>{data.classes.length}</small></button>
           {user.role === 'teacher' && <button className={teacherTab === 'projects' ? 'active' : ''} onClick={() => selectDashboardTab('projects')}><FolderOpen size={18}/><span>Projects</span><small>{data.projects.length}</small></button>}

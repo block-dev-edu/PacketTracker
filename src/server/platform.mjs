@@ -4,6 +4,8 @@ import { dirname, resolve } from 'node:path';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { normalizedAssignmentSpec, validateAssignmentSpec } from '../assignments/spec.js';
 import { evaluateAssignment } from '../assignments/evaluate.js';
+import { ActivityServiceError, createActivityService, installActivitySchema } from '../activities/service.mjs';
+import { builtInActivities } from '../activities/builtins.mjs';
 
 const databasePath = resolve(process.env.PACKETTRACKER_DB || 'data/packettracker.db');
 mkdirSync(dirname(databasePath), { recursive: true });
@@ -77,6 +79,12 @@ if (assignmentColumns.some(column => column.name === 'class_id')) {
   const insertAssignmentClass = db.prepare('INSERT OR IGNORE INTO assignment_classes (assignment_id,class_id) VALUES (?,?)');
   for (const item of legacyAssignments) insertAssignmentClass.run(item.id, item.class_id);
 }
+installActivitySchema(db);
+const activityService = createActivityService(db);
+function seedBuiltInActivityCatalog() {
+  for (const definition of builtInActivities) activityService.upsertBuiltInActivity(definition);
+}
+seedBuiltInActivityCatalog();
 
 const normalizeEmail = value => String(value || '').trim().toLowerCase();
 const publicUser = user => user && ({ id: user.id, name: user.name, email: user.email, role: user.role });
@@ -125,6 +133,13 @@ function requireUser(request, response, next) {
 }
 
 const fail = (response, status, message) => response.status(status).json({ error: message });
+const activityEndpoint = handler => (request, response, next) => {
+  try { handler(request, response); }
+  catch (error) {
+    if (error instanceof ActivityServiceError) response.status(error.status).json({ error: error.message, ...(error.details?.length ? { details: error.details } : {}) });
+    else next(error);
+  }
+};
 
 export function installPlatformApi(app) {
   app.post('/api/auth/register', (request, response) => {
@@ -163,7 +178,15 @@ export function installPlatformApi(app) {
     const assignments = request.user.role === 'teacher'
       ? db.prepare("SELECT a.id,a.title,a.specification,a.created_at,p.id project_id,COUNT(DISTINCT sp.id) student_projects,GROUP_CONCAT(DISTINCT c.id) class_ids,GROUP_CONCAT(DISTINCT c.name) class_names FROM assignments a LEFT JOIN assignment_classes ac ON ac.assignment_id=a.id LEFT JOIN classes c ON c.id=ac.class_id LEFT JOIN projects p ON p.assignment_id=a.id AND p.owner_id=a.teacher_id LEFT JOIN projects sp ON sp.assignment_id=a.id AND sp.owner_id<>a.teacher_id WHERE a.teacher_id=? GROUP BY a.id ORDER BY a.created_at DESC").all(request.user.id)
       : db.prepare("SELECT a.id,a.title,a.specification,a.created_at,p.id project_id,GROUP_CONCAT(DISTINCT c.id) class_ids,GROUP_CONCAT(DISTINCT c.name) class_names FROM enrollments e JOIN assignment_classes ac ON ac.class_id=e.class_id JOIN assignments a ON a.id=ac.assignment_id JOIN classes c ON c.id=ac.class_id LEFT JOIN projects p ON p.assignment_id=a.id AND p.owner_id=e.student_id WHERE e.student_id=? GROUP BY a.id ORDER BY a.created_at DESC").all(request.user.id);
-    response.json({ classes, projects, sharedProjects, assignments: assignments.map(item => ({ ...item, classIds: item.class_ids ? item.class_ids.split(',').map(Number) : [], classNames: item.class_names ? item.class_names.split(',') : [], specification: JSON.parse(item.specification) })) });
+    const classStudents = request.user.role === 'teacher'
+      ? db.prepare('SELECT e.class_id,u.id,u.name,u.email FROM enrollments e JOIN classes c ON c.id=e.class_id JOIN users u ON u.id=e.student_id WHERE c.teacher_id=? ORDER BY e.class_id,u.name').all(request.user.id).map(student => {
+        const progress = activityService.getStudentProgress(request.user, student.id);
+        const totals = activityService.getBuiltInTotals(request.user, student.id);
+        const skillBreakdown = activityService.getBuiltInSkillBreakdown(request.user, student.id);
+        return { ...student, progress, totals, skillBreakdown };
+      })
+      : [];
+    response.json({ classes, classStudents, projects, sharedProjects, assignments: assignments.map(item => ({ ...item, classIds: item.class_ids ? item.class_ids.split(',').map(Number) : [], classNames: item.class_names ? item.class_names.split(',') : [], specification: JSON.parse(item.specification) })) });
   });
 
   app.post('/api/classes', requireUser, (request, response) => {
@@ -216,6 +239,40 @@ export function installPlatformApi(app) {
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     response.json({ assignmentId: assignment.id, classIds });
   });
+  app.put('/api/assignments/:id/example', requireUser, (request, response) => {
+    if (request.user.role !== 'teacher') return fail(response, 403, 'Only teachers can save assignment examples');
+    const assignment = db.prepare('SELECT id,title,specification FROM assignments WHERE id=? AND teacher_id=?').get(request.params.id, request.user.id);
+    if (!assignment) return fail(response, 404, 'Assignment not found');
+    const document = request.body?.document;
+    if (!document || typeof document !== 'object') return fail(response, 400, 'A project document is required');
+    let project = db.prepare('SELECT * FROM projects WHERE owner_id=? AND assignment_id=? ORDER BY updated_at DESC LIMIT 1').get(request.user.id, assignment.id);
+    if (project) {
+      if (!request.body?.overwrite) return fail(response, 409, 'A saved example already exists for this assignment');
+      db.prepare('UPDATE projects SET name=?,document=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(assignment.title, JSON.stringify(document), project.id);
+    } else {
+      const result = db.prepare('INSERT INTO projects (owner_id,name,assignment_id,document) VALUES (?,?,?,?)').run(request.user.id, assignment.title, assignment.id, JSON.stringify(document));
+      project = db.prepare('SELECT * FROM projects WHERE id=?').get(result.lastInsertRowid);
+    }
+    project = db.prepare('SELECT * FROM projects WHERE id=?').get(project.id);
+    response.json({ ...project, document: JSON.parse(project.document), assignment: { ...assignment, specification: JSON.parse(assignment.specification) } });
+  });
+
+  app.get('/api/skill-activities', requireUser, activityEndpoint((request, response) => response.json({ activities: activityService.listActivities(request.user) })));
+  app.post('/api/skill-activities', requireUser, activityEndpoint((request, response) => response.status(201).json(activityService.createTeacherActivity(request.user, request.body?.definition))));
+  app.get('/api/skill-activities/:id', requireUser, activityEndpoint((request, response) => response.json(activityService.getActivity(request.user, Number(request.params.id)))));
+  app.put('/api/skill-activities/:id', requireUser, activityEndpoint((request, response) => response.json(activityService.updateTeacherActivity(request.user, Number(request.params.id), request.body?.definition))));
+  app.get('/api/skill-activities/:id/assignments', requireUser, activityEndpoint((request, response) => response.json({ assignments: activityService.listAssignments(request.user, Number(request.params.id)) })));
+  app.post('/api/skill-activities/:id/assignments', requireUser, activityEndpoint((request, response) => response.status(201).json(activityService.assignActivity(request.user, Number(request.params.id), request.body))));
+  app.post('/api/skill-activities/:id/attempts', requireUser, activityEndpoint((request, response) => response.status(201).json(activityService.startAttempt(request.user, Number(request.params.id), request.body?.level))));
+  app.get('/api/skill-activities/:id/open-attempt', requireUser, activityEndpoint((request, response) => response.json({ attempt: activityService.getOpenAttempt(request.user, Number(request.params.id)) })));
+  app.get('/api/skill-activities/:id/attempts', requireUser, activityEndpoint((request, response) => response.json({ attempts: activityService.attemptHistory(request.user, Number(request.params.id), request.query.studentId || request.user.id) })));
+  app.get('/api/skill-attempts/:id', requireUser, activityEndpoint((request, response) => response.json(activityService.getAttempt(request.user, Number(request.params.id)))));
+  app.put('/api/skill-attempts/:id', requireUser, activityEndpoint((request, response) => response.json(activityService.saveAttempt(request.user, Number(request.params.id), request.body))));
+  app.post('/api/skill-attempts/:id/evaluate', requireUser, activityEndpoint((request, response) => response.json(activityService.evaluateAttempt(request.user, Number(request.params.id)))));
+  app.post('/api/skill-attempts/:id/complete', requireUser, activityEndpoint((request, response) => response.json(activityService.completeAttempt(request.user, Number(request.params.id)))));
+  app.post('/api/skill-attempts/:id/abandon', requireUser, activityEndpoint((request, response) => response.json(activityService.abandonAttempt(request.user, Number(request.params.id)))));
+  app.get('/api/skill-progress', requireUser, activityEndpoint((request, response) => response.json({ progress: activityService.getStudentProgress(request.user), totals: activityService.getBuiltInTotals(request.user) })));
+  app.get('/api/students/:id/skill-progress', requireUser, activityEndpoint((request, response) => response.json({ progress: activityService.getStudentProgress(request.user, Number(request.params.id)), totals: activityService.getBuiltInTotals(request.user, Number(request.params.id)) })));
 
   app.post('/api/projects', requireUser, (request, response) => {
     const name = String(request.body?.name || 'Untitled Network').trim() || 'Untitled Network';

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch-path=server.mjs --watch-path=src/server --watch-path=src/assignments server.mjs --dev",
+    "dev": "node --watch-path=server.mjs --watch-path=src/server --watch-path=src/assignments --watch-path=src/activities server.mjs --dev",
     "build": "vite build",
     "test": "node --test",
     "prestart": "npm run build",
