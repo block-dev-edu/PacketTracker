@@ -5,7 +5,7 @@ import {
   Copy, Database, Download, Ellipsis, EthernetPort, FilePlus2, Gauge, Grid3X3,
   FolderOpen, Globe2, HardDrive, Headphones, HousePlug, Laptop, LockKeyhole, Mail, Menu, Minus, Monitor,
   Moon, MousePointer2, Network, PanelLeftClose, PanelLeftOpen, Phone, Plus, Printer,
-  Pencil, RadioTower, Redo2, RotateCcw, Router, Save, Search, Server, ShieldCheck,
+  Pencil, RadioTower, Redo2, RotateCcw, Router, Save, Scan, Search, Server, ShieldCheck,
   Smartphone, Sparkles, SquareDashedMousePointer, Sun, Trash2, TriangleAlert, Undo2,
   GraduationCap, LogOut, Send, Share2, Users, Video, Wifi, X, ZoomIn, ZoomOut
 } from 'lucide-react';
@@ -67,6 +67,8 @@ const CANVAS_WIDTH = 6400;
 const CANVAS_HEIGHT = 4400;
 const CANVAS_ORIGIN_X = 1800;
 const CANVAS_ORIGIN_Y = 1200;
+const GRID_SIZE = 20;
+const MIN_ZOOM = 20;
 
 const serverRoles = [
   { id: 'generic', name: 'Generic Server', icon: Server, purpose: 'A configurable host for custom network services.', capabilities: ['ip'] },
@@ -292,7 +294,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   const [query, setQuery] = useState('');
   const [placed, setPlaced] = useState(() => loadSavedDesign(draft?.devices ?? project?.document?.devices));
   const [selected, setSelected] = useState(null);
-  const [zoom, setZoom] = useState(() => Math.max(50, Math.min(150, Number(savedEditorView.zoom) || 100)));
+  const [zoom, setZoom] = useState(() => Math.max(MIN_ZOOM, Math.min(150, Number(savedEditorView.zoom) || 100)));
+  const [gridLock, setGridLock] = useState(savedEditorView.gridLock === true);
   const [sidebarOpen, setSidebarOpen] = useState(savedEditorView.sidebarOpen !== false);
   const [inspectorWidth, setInspectorWidth] = useState(() => Math.max(260, Math.min(640, Number(localStorage.getItem('packettracker-inspector-width')) || 292)));
   const [toast, setToast] = useState('');
@@ -319,7 +322,9 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   const [isPanning, setIsPanning] = useState(false);
   const [assignmentPanelOpen, setAssignmentPanelOpen] = useState(false);
   const [assignmentPanelCategory, setAssignmentPanelCategory] = useState('overview');
-  const [activityHelpOpen, setActivityHelpOpen] = useState(Boolean(activity));
+  const [activityHelpOpen, setActivityHelpOpen] = useState(() => activity ? savedEditorView.activityHelpOpen !== false : false);
+  const [activityPanelTab, setActivityPanelTab] = useState(() => ['instructions', 'challenge'].includes(savedEditorView.activityPanelTab) ? savedEditorView.activityPanelTab : 'instructions');
+  const [activityPanelWidth, setActivityPanelWidth] = useState(() => Math.max(300, Math.min(650, Number(localStorage.getItem('packettracker-activity-panel-width')) || 390)));
   const [activityResult, setActivityResult] = useState(null);
   const [activityBusy, setActivityBusy] = useState(false);
   const [activitySaveState, setActivitySaveState] = useState('saved');
@@ -395,7 +400,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     if (viewSaveFrameRef.current) cancelAnimationFrame(viewSaveFrameRef.current);
     viewSaveFrameRef.current = requestAnimationFrame(() => {
       const previous = loadEditorView(project?.id);
-      localStorage.setItem(editorViewKey(project?.id), JSON.stringify({ ...previous, scrollLeft, scrollTop, zoom, sidebarOpen, activeCategory, inspectorPanel }));
+      localStorage.setItem(editorViewKey(project?.id), JSON.stringify({ ...previous, scrollLeft, scrollTop, zoom, gridLock, sidebarOpen, activeCategory, inspectorPanel }));
       viewSaveFrameRef.current = null;
     });
   }
@@ -407,8 +412,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   useEffect(() => {
     const previous = loadEditorView(project?.id);
     const canvas = canvasRef.current;
-    localStorage.setItem(editorViewKey(project?.id), JSON.stringify({ ...previous, zoom, sidebarOpen, activeCategory, inspectorPanel, ...(canvas ? { scrollLeft: canvas.scrollLeft, scrollTop: canvas.scrollTop } : {}) }));
-  }, [project?.id, zoom, sidebarOpen, activeCategory, inspectorPanel]);
+    localStorage.setItem(editorViewKey(project?.id), JSON.stringify({ ...previous, zoom, gridLock, sidebarOpen, activeCategory, inspectorPanel, activityHelpOpen, activityPanelTab, ...(canvas ? { scrollLeft: canvas.scrollLeft, scrollTop: canvas.scrollTop } : {}) }));
+  }, [project?.id, zoom, gridLock, sidebarOpen, activeCategory, inspectorPanel, activityHelpOpen, activityPanelTab]);
   useEffect(() => () => { if (viewSaveFrameRef.current) cancelAnimationFrame(viewSaveFrameRef.current); }, []);
   useEffect(() => {
     if (readOnly || !project?.id) return;
@@ -426,6 +431,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     return () => clearTimeout(timer);
   }, [activity?.attempt?.id, placed, connections, notes, segments, readOnly]);
   useEffect(() => localStorage.setItem('packettracker-inspector-width', String(inspectorWidth)), [inspectorWidth]);
+  useEffect(() => localStorage.setItem('packettracker-activity-panel-width', String(activityPanelWidth)), [activityPanelWidth]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('packettracker-theme', theme);
@@ -674,6 +680,44 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     setConnections(current => current.filter(item => item.id !== connectionId));
   }
 
+  const snapCoordinate = value => gridLock ? Math.round(value / GRID_SIZE) * GRID_SIZE : value;
+
+  function autoZoomCanvas() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const content = [
+      ...placed.map(item => ({ left: item.x, top: item.y, right: item.x + 53, bottom: item.y + 58 })),
+      ...segments.map(segment => ({ left: segment.x, top: segment.y, right: segment.x + segment.width, bottom: segment.y + segment.height })),
+      ...notes.map(note => ({ left: note.x, top: note.y, right: note.x + 176, bottom: note.y + 108 }))
+    ];
+    if (!content.length) {
+      setZoom(100);
+      requestAnimationFrame(() => { canvas.scrollLeft = Math.max(0, CANVAS_ORIGIN_X - 80); canvas.scrollTop = Math.max(0, CANVAS_ORIGIN_Y - 80); });
+      return;
+    }
+    const bounds = content.reduce((result, item) => ({
+      left: Math.min(result.left, item.left), top: Math.min(result.top, item.top),
+      right: Math.max(result.right, item.right), bottom: Math.max(result.bottom, item.bottom)
+    }), { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
+    const inspectorOpen = Boolean(selected || selectedConnection);
+    const rightOcclusion = (activity && activityHelpOpen ? activityPanelWidth : 0) + (inspectorOpen ? inspectorWidth + 24 : 0);
+    const viewportWidth = Math.max(240, canvas.clientWidth - rightOcclusion);
+    const viewportHeight = Math.max(180, canvas.clientHeight);
+    const padding = 56;
+    const contentWidth = Math.max(80, bounds.right - bounds.left);
+    const contentHeight = Math.max(70, bounds.bottom - bounds.top);
+    const fitted = Math.floor(Math.min((viewportWidth - padding * 2) / contentWidth, (viewportHeight - padding * 2) / contentHeight) * 100);
+    const nextZoom = Math.max(MIN_ZOOM, Math.min(150, fitted));
+    setZoom(nextZoom);
+    requestAnimationFrame(() => {
+      const scale = nextZoom / 100;
+      const centerX = (bounds.left + bounds.right) / 2;
+      const centerY = (bounds.top + bounds.bottom) / 2;
+      canvas.scrollLeft = Math.max(0, (CANVAS_ORIGIN_X + centerX) * scale - viewportWidth / 2);
+      canvas.scrollTop = Math.max(0, (CANVAS_ORIGIN_Y + centerY) * scale - viewportHeight / 2);
+    });
+  }
+
   function addDevice(device, point) {
     const canvas = canvasRef.current;
     const bounds = canvas?.getBoundingClientRect();
@@ -684,8 +728,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     const item = {
       ...device,
       instanceId: uid(),
-      x: Math.max(30, x - 27),
-      y: Math.max(30, y - 23),
+      x: snapCoordinate(Math.max(30, x - 27)),
+      y: snapCoordinate(Math.max(30, y - 23)),
       label: device.name,
       interfaces: structuredClone(definition?.defaults?.interfaces || {}),
       gateway: null,
@@ -729,15 +773,16 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   }
 
   function moveDevice(instanceId, x, y) {
+    const snappedX = snapCoordinate(x), snappedY = snapCoordinate(y);
     setPlaced(current => {
       const anchor = current.find(item => item.instanceId === instanceId);
       if (!anchor) return current;
       if (selectedIds.length > 1 && selectedIds.includes(instanceId)) {
-        const dx = x - anchor.x, dy = y - anchor.y;
+        const dx = snappedX - anchor.x, dy = snappedY - anchor.y;
         const selectedSet = new Set(selectedIds);
         return current.map(item => selectedSet.has(item.instanceId) ? { ...item, x: Math.max(8, item.x + dx), y: Math.max(8, item.y + dy) } : item);
       }
-      return current.map(item => item.instanceId === instanceId ? { ...item, x, y } : item);
+      return current.map(item => item.instanceId === instanceId ? { ...item, x: snappedX, y: snappedY } : item);
     });
   }
 
@@ -907,6 +952,25 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     };
   }
 
+  function handleCanvasWheel(event) {
+    event.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas || !event.deltaY) return;
+    const nextZoom = Math.max(MIN_ZOOM, Math.min(150, zoom + (event.deltaY < 0 ? 10 : -10)));
+    if (nextZoom === zoom) return;
+    const bounds = canvas.getBoundingClientRect();
+    const uiScale = displayScale();
+    const pointerX = (event.clientX - bounds.left) / uiScale;
+    const pointerY = (event.clientY - bounds.top) / uiScale;
+    const worldX = (canvas.scrollLeft + pointerX) / (zoom / 100);
+    const worldY = (canvas.scrollTop + pointerY) / (zoom / 100);
+    setZoom(nextZoom);
+    requestAnimationFrame(() => {
+      canvas.scrollLeft = Math.max(0, worldX * (nextZoom / 100) - pointerX);
+      canvas.scrollTop = Math.max(0, worldY * (nextZoom / 100) - pointerY);
+    });
+  }
+
   function handleCanvasPointerDown(event) {
     setContextMenu(null);
     if (event.target.closest('.placed-device, .note-card, .empty-state')) return;
@@ -920,7 +984,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
       return;
     }
     if (activeTool === 'note') {
-      const note = { id: uid(), x: point.x, y: point.y, text: '' };
+      const note = { id: uid(), x: snapCoordinate(point.x), y: snapCoordinate(point.y), text: '' };
       setNotes(current => [...current, note]);
       setSelected(null);
       setToast('Note added — start typing');
@@ -985,7 +1049,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
       const x = Math.min(segmentDrawing.startX, point.x), y = Math.min(segmentDrawing.startY, point.y);
       const width = Math.abs(point.x - segmentDrawing.startX), height = Math.abs(point.y - segmentDrawing.startY);
       if (width >= 40 && height >= 30) {
-        setSegments(current => [...current, { id: uid(), x, y, width, height, label: segmentDraft.label.trim() || 'Network segment', color: segmentDraft.color }]);
+        setSegments(current => [...current, { id: uid(), x: snapCoordinate(x), y: snapCoordinate(y), width: snapCoordinate(width), height: snapCoordinate(height), label: segmentDraft.label.trim() || 'Network segment', color: segmentDraft.color }]);
         setToast('Network segment added');
       } else setToast('Drag a larger box for the segment');
       setSegmentDrawing(null);
@@ -1049,6 +1113,15 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     finally { setActivityBusy(false); }
   }
 
+  async function saveActivityProgress() {
+    if (!onActivitySave || activitySaveState === 'saving') return;
+    setActivitySaveState('saving');
+    try {
+      await onActivitySave({ version: 2, devices: serializeDesign(placed), connections, notes, segments });
+      setActivitySaveState('saved'); setToast('Activity progress saved');
+    } catch (error) { setActivitySaveState('error'); setToast(error.message || 'Could not save the activity'); }
+  }
+
   async function resetActivity() {
     if (!onActivityReset || activityBusy || !window.confirm('Reset this activity? Your current activity work will be discarded and replaced with a fresh starting network.')) return;
     setActivityBusy(true);
@@ -1071,8 +1144,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
       <div className="brand editor-brand"><img className="editor-brand-logo" src="/packettracker-logo-with-text.png" alt="PacketTracker"/></div>
       <div className="project-header-nav"><span className="file-name">{project?.name || 'Untitled Network'}</span><button className="back-to-projects" onClick={onBack}>{activity ? 'Back to skills' : 'Back to projects'}</button></div>
       <div className="top-actions">
-        {activity && <><span className={`activity-save-state ${activitySaveState}`}>{activitySaveState === 'saving' ? 'Saving…' : activitySaveState === 'error' ? 'Save failed' : 'Progress saved'}</span><button className="button secondary" disabled={activityBusy} onClick={resetActivity}><RotateCcw size={16}/> Reset activity</button><button className="button secondary" onClick={() => setActivityHelpOpen(true)}><CircleHelp size={16}/> Instructions</button><button className="button primary activity-complete-button" disabled={activityBusy} onClick={completeActivity}><GraduationCap size={16}/>{activityBusy ? 'Working…' : 'Check & complete'}</button></>}
-        {assignmentSpec && <button className={`assignment-summary-button ${assignmentProgress}`} style={{ '--challenge-progress': `${assignmentPercent}%` }} onClick={() => setAssignmentPanelOpen(true)}><FilePlus2 size={17}/><span>Show challenge</span><small>{assignmentPassed} of {assignmentTotal} complete</small></button>}
+        {activity && <><span className={`activity-save-state ${activitySaveState}`}>{activitySaveState === 'saving' ? 'Saving…' : activitySaveState === 'error' ? 'Save failed' : 'Progress saved'}</span><button className="button secondary" disabled={activityBusy} onClick={resetActivity}><RotateCcw size={16}/> Reset activity</button><button className={`button secondary ${activityHelpOpen ? 'active' : ''}`} onClick={() => setActivityHelpOpen(true)}><CircleHelp size={16}/> Info</button><button className="button primary" disabled={activitySaveState === 'saving'} onClick={saveActivityProgress}><Save size={16}/>{activitySaveState === 'saving' ? 'Saving…' : 'Save'}</button></>}
+        {assignmentSpec && (activity ? <div className={`assignment-summary-button assignment-summary-indicator ${assignmentProgress}`} style={{ '--challenge-progress': `${assignmentPercent}%` }} aria-label={`Challenge progress: ${assignmentPassed} of ${assignmentTotal} complete`}><FilePlus2 size={17}/><span>Challenge progress</span><small>{assignmentPassed} of {assignmentTotal} complete</small></div> : <button className={`assignment-summary-button ${assignmentProgress}`} disabled={activityBusy} style={{ '--challenge-progress': `${assignmentPercent}%` }} onClick={() => setAssignmentPanelOpen(true)}><FilePlus2 size={17}/><span>Show challenge</span><small>{assignmentPassed} of {assignmentTotal} complete</small></button>)}
         <button className="icon-button" title="Undo (Ctrl+Z)" disabled={!historyRef.current.past.length && !pendingHistoryRef.current} onClick={undoDesign}><Undo2 size={17}/></button>
         <button className="icon-button" title="Redo (Ctrl+Y)" disabled={!historyRef.current.future.length} onClick={redoDesign}><Redo2 size={17}/></button>
         <div className="divider" />
@@ -1090,7 +1163,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
       </div>
     </header>
 
-    <main className="workspace">
+    <main className={`workspace ${activity && activityHelpOpen ? 'activity-panel-open' : ''}`} style={{ '--activity-panel-width': `${activityPanelWidth}px` }}>
       <aside className={`sidebar ${sidebarOpen ? '' : 'collapsed'}`}>
         <div className="sidebar-header"><span>Device library</span><button className="icon-button" onClick={() => setSidebarOpen(false)}><PanelLeftClose size={17}/></button></div>
         <div className="search"><Search size={16}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search devices" />{query && <button onClick={() => setQuery('')}><X size={14}/></button>}</div>
@@ -1132,7 +1205,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
       {!sidebarOpen && <button className="sidebar-opener" onClick={() => setSidebarOpen(true)}><PanelLeftOpen size={18}/></button>}
 
       <section className="canvas-wrap">
-        {activity && activityHelpOpen && <ActivityInstructionsModal activity={activity} onUseHint={async hintId => { await onActivitySave?.({ version: 2, devices: serializeDesign(placed), connections, notes, segments }, { hintIds: [hintId] }); }} onClose={() => setActivityHelpOpen(false)}/>}
+        {activity && activityHelpOpen && <ActivityInstructionsPanel activity={activity} tab={activityPanelTab} onTabChange={setActivityPanelTab} width={activityPanelWidth} onWidthChange={setActivityPanelWidth} specification={assignmentSpec} evaluation={assignmentEvaluation} points={assignmentPoints} onUseHint={async hintId => { await onActivitySave?.({ version: 2, devices: serializeDesign(placed), connections, notes, segments }, { hintIds: [hintId] }); }} onClose={() => setActivityHelpOpen(false)}/>}
         {activityResult && <ActivityResultModal result={activityResult} level={activity.attempt.requestedLevel} onClose={() => setActivityResult(null)} onBack={onBack}/>}
         {assignmentSpec && assignmentPanelOpen && <AssignmentChallengeModal spec={assignmentSpec} evaluation={assignmentEvaluation} devices={placed} activeCategory={assignmentPanelCategory} onCategoryChange={setAssignmentPanelCategory} onClose={() => setAssignmentPanelOpen(false)}/>}
         <div className="canvas-toolbar">
@@ -1142,10 +1215,12 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
           <button className={`tool ${activeTool === 'segment' ? 'active' : ''}`} onClick={() => setTool('segment')}><Box size={17}/><span>Add segment</span></button>
           <div className="divider" />
           <button className={`tool ${activeTool === 'note' ? 'active' : ''}`} onClick={() => setTool('note')}><FilePlus2 size={17}/><span>Note</span></button>
+          <button className={`tool ${gridLock ? 'active' : ''}`} title="Snap newly placed and moved items to the background grid" aria-pressed={gridLock} onClick={() => setGridLock(value => !value)}><Grid3X3 size={17}/><span>Grid lock</span></button>
           <div className="divider" />
-          <button className="tool zoom-tool" title="Zoom out" aria-label="Zoom out" disabled={zoom <= 50} onClick={() => setZoom(value => Math.max(50, value - 10))}><ZoomOut size={17}/></button>
+          <button className="tool zoom-tool" title="Zoom out" aria-label="Zoom out" disabled={zoom <= MIN_ZOOM} onClick={() => setZoom(value => Math.max(MIN_ZOOM, value - 10))}><ZoomOut size={17}/></button>
           <span className="toolbar-zoom-value" aria-label={`Current zoom ${zoom}%`}>{zoom}%</span>
           <button className="tool zoom-tool" title="Zoom in" aria-label="Zoom in" disabled={zoom >= 150} onClick={() => setZoom(value => Math.min(150, value + 10))}><ZoomIn size={17}/></button>
+          <button className="tool auto-zoom-tool" title="Fit the network design in the visible workspace" onClick={autoZoomCanvas}><Scan size={17}/><span>Auto zoom</span></button>
         </div>
         {!!duplicateAlerts.length && <div className="topology-alert" role="alert"><TriangleAlert size={17}/><div><strong>Duplicate IP address detected</strong><span>{duplicateAlerts.map(alert => `${alert.address} — ${alert.names.join(' and ')}`).join(' · ')}</span></div></div>}
         {(activeTool !== 'select' || (pingDialog && !pingDialog.targetId)) && <div className="mode-hint">
@@ -1159,7 +1234,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
           <input aria-label="Segment label" value={segmentDraft.label} onChange={event => setSegmentDraft(current => ({ ...current, label: event.target.value }))} placeholder="Segment label" />
           <div className="segment-colors" aria-label="Segment color">{['#5f79ff', '#16a3a6', '#50a66c', '#d68a28', '#df5a60', '#7c62c8'].map(color => <button key={color} aria-label={`Use ${color}`} className={segmentDraft.color === color ? 'active' : ''} style={{ background: color }} onClick={() => setSegmentDraft(current => ({ ...current, color }))}/>)}</div>
         </div>}
-        <div ref={canvasRef} className={`canvas tool-${pingDialog && !pingDialog.targetId ? 'ping' : connectionActive ? 'connect' : activeTool} ${isPanning ? 'panning' : ''}`} onScroll={persistEditorScroll} onContextMenu={handleCanvasContextMenu} onDragOver={e => e.preventDefault()} onDrop={e => {
+        <div ref={canvasRef} className={`canvas tool-${pingDialog && !pingDialog.targetId ? 'ping' : connectionActive ? 'connect' : activeTool} ${isPanning ? 'panning' : ''}`} onScroll={persistEditorScroll} onWheel={handleCanvasWheel} onContextMenu={handleCanvasContextMenu} onDragOver={e => e.preventDefault()} onDrop={e => {
           e.preventDefault();
           const device = devices.find(d => d.id === e.dataTransfer.getData('deviceId'));
           const serverRole = serverRoles.find(role => role.id === e.dataTransfer.getData('serverRole'));
@@ -1228,7 +1303,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
         </div>
         <div className="statusbar">
           <div><span className="status-dot"/> Logical workspace <span className="separator">•</span> {placed.length} {placed.length === 1 ? 'device' : 'devices'}{selectedIds.length > 0 && ` · ${selectedIds.length} selected`}</div>
-          <div className="zoom-control"><button onClick={() => setZoom(z => Math.max(50, z - 10))}><ZoomOut size={16}/></button><input type="range" min="50" max="150" value={zoom} onChange={e => setZoom(Number(e.target.value))}/><span>{zoom}%</span><button onClick={() => setZoom(z => Math.min(150, z + 10))}><ZoomIn size={16}/></button><button onClick={() => setZoom(100)}><RotateCcw size={14}/></button></div>
+          <div className="zoom-control"><button onClick={() => setZoom(z => Math.max(MIN_ZOOM, z - 10))}><ZoomOut size={16}/></button><input type="range" min={MIN_ZOOM} max="150" value={zoom} onChange={e => setZoom(Number(e.target.value))}/><span>{zoom}%</span><button onClick={() => setZoom(z => Math.min(150, z + 10))}><ZoomIn size={16}/></button><button onClick={() => setZoom(100)}><RotateCcw size={14}/></button></div>
         </div>
         {selected && <DeviceInspector
           item={placed.find(item => item.instanceId === selected)}
@@ -1278,7 +1353,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
       })()}
     </div>}
     {pingDialog?.targetId && <PingDialog sourceId={pingDialog.sourceId} targetId={pingDialog.targetId} devices={placed} connections={connections} onClose={() => setPingDialog(null)}/>}
-    {cliDeviceId && <CliDialog item={placed.find(item => item.instanceId === cliDeviceId)} onSwitchingChange={updateSwitching} onNgfwChange={updateNgfw} onFirewallChange={updateFirewall} onRouterChange={updateRouter} onDone={() => setCliDeviceId(null)}/>}
+    {cliDeviceId && <CliDialog item={placed.find(item => item.instanceId === cliDeviceId)} sidePanelOpen={activityHelpOpen} sidePanelWidth={activityPanelWidth} onSwitchingChange={updateSwitching} onNgfwChange={updateNgfw} onFirewallChange={updateFirewall} onRouterChange={updateRouter} onDone={() => setCliDeviceId(null)}/>}
     {serverPickerOpen && <div className="modal-backdrop" onPointerDown={() => setServerPickerOpen(false)}>
       <section className="server-picker" role="dialog" aria-modal="true" aria-labelledby="server-picker-title" onPointerDown={event => event.stopPropagation()}>
         <div className="server-picker-header"><div><span>Configure device</span><h2 id="server-picker-title">Choose a server role</h2><p>Select the primary service this server will provide.</p></div><button className="icon-button" onClick={() => setServerPickerOpen(false)}><X size={17}/></button></div>
@@ -1446,9 +1521,9 @@ function PingDialog({ sourceId, targetId, devices, connections, onClose }) {
   </div>;
 }
 
-function CliDialog({ item, onSwitchingChange, onNgfwChange, onFirewallChange, onRouterChange, onDone }) {
+function CliDialog({ item, sidePanelOpen = false, sidePanelWidth = 390, onSwitchingChange, onNgfwChange, onFirewallChange, onRouterChange, onDone }) {
   if (!item) return null;
-  return <div className="modal-backdrop cli-backdrop">
+  return <div className={`modal-backdrop cli-backdrop ${sidePanelOpen ? 'with-instructions' : ''}`} style={{ '--activity-panel-width': `${sidePanelWidth}px` }}>
     <section className="cli-dialog" role="dialog" aria-modal="true" aria-labelledby="cli-dialog-title" onPointerDown={event => event.stopPropagation()}>
       <div className="cli-dialog-header"><div><span>Device command line</span><h2 id="cli-dialog-title">{item.customName || item.name}</h2></div><p>Finish with <code>end</code>, or use <code>exit</code> from the top-level prompt.</p></div>
       {item.id === 'switch-managed' && <ManagedSwitchTerminal item={item} onSwitchingChange={onSwitchingChange} onDone={onDone}/>}
@@ -1946,6 +2021,8 @@ function VlanSubinterfaceEditor({ item, ports, onNgfwChange, onRouterChange }) {
 
 function PlacedDevice({ item, selected, pingSource, ipConflicts, interactionMode, zoom, cancelToken, onPingTarget, onConnect, onContextMenu, onSelect, onMove, onDelete }) {
   const Icon = item.icon;
+  const physicalPorts = getDeviceDefinition(item.id)?.ports || [];
+  const portSummary = physicalPorts.length === 1 ? `1 physical port · ${physicalPorts[0].label}` : physicalPorts.length ? `${physicalPorts.length} physical ports · ${physicalPorts.map(port => port.label).join(', ')}` : 'No physical network ports';
   const [dragging, setDragging] = useState(false);
   const offset = useRef({ x: 0, y: 0 });
   const dragOrigin = useRef(null);
@@ -1990,7 +2067,7 @@ function PlacedDevice({ item, selected, pingSource, ipConflicts, interactionMode
         <strong>{item.customName || item.name}</strong>
         {!!ipConflicts.length && <em className="tooltip-error">Duplicate IP: {[...new Set(ipConflicts.map(conflict => conflict.address))].join(', ')}</em>}
         <p>{item.purpose || item.model || 'A general-purpose network device.'}</p>
-        <small>{item.ports || 'Port details coming soon'}</small>
+        <small>{portSummary}</small>
         {!!item.capabilities?.length && <span>{featureLabels(item.capabilities).join(' · ')}</span>}
       </span>
     </button>
@@ -1999,19 +2076,29 @@ function PlacedDevice({ item, selected, pingSource, ipConflicts, interactionMode
 
 function levelLabel(level) { return level === 'assisted' ? 'Hinted' : level ? `${level[0].toUpperCase()}${level.slice(1)}` : ''; }
 
-function ActivityInstructionsModal({ activity, onUseHint, onClose }) {
+function ActivityInstructionsPanel({ activity, tab, onTabChange, width, onWidthChange, specification, evaluation, points, onUseHint, onClose }) {
   const instruction = activity.definition.instructions[activity.attempt.requestedLevel] || {};
   const [revealed, setRevealed] = useState([]);
-  return <div className="activity-modal-backdrop" onPointerDown={onClose}>
-    <section className="activity-instructions-modal" role="dialog" aria-modal="true" aria-labelledby="activity-instructions-title" onPointerDown={event => event.stopPropagation()}>
+  const resize = useRef(null);
+  const progress = points?.all || { passed: 0, total: 0 };
+  const requirementName = requirement => requirement.title || (requirement.type === 'relationship' ? `${specification?.roles?.find(role => role.id === requirement.from)?.name || requirement.from} → ${specification?.roles?.find(role => role.id === requirement.to)?.name || requirement.to}` : requirement.type === 'constraint' ? 'Network separation' : 'Device configuration');
+  function startResize(event) { event.preventDefault(); event.stopPropagation(); resize.current = { pointerId: event.pointerId }; event.currentTarget.setPointerCapture(event.pointerId); }
+  function continueResize(event) { if (resize.current) onWidthChange(Math.max(300, Math.min(650, window.innerWidth - event.clientX))); }
+  function stopResize(event) { resize.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }
+  return <aside className="activity-instructions-panel" style={{ width }} role="complementary" aria-labelledby="activity-instructions-title" onPointerDown={event => event.stopPropagation()}>
+      <div className="activity-panel-resize-handle" role="separator" aria-label="Resize activity panel" aria-orientation="vertical" tabIndex="0" onPointerDown={startResize} onPointerMove={continueResize} onPointerUp={stopResize} onPointerCancel={stopResize} onKeyDown={event => { if (event.key === 'ArrowLeft') onWidthChange(Math.min(650, width + 20)); else if (event.key === 'ArrowRight') onWidthChange(Math.max(300, width - 20)); }}/>
       <header><div><span>{levelLabel(activity.attempt.requestedLevel)} level</span><h2 id="activity-instructions-title">{activity.definition.title}</h2></div><button className="icon-button" onClick={onClose}><X size={18}/></button></header>
-      <div className="activity-instructions-body"><p className="activity-summary">{instruction.summary}</p>
+      <nav className="activity-panel-tabs" aria-label="Activity information"><button className={tab === 'instructions' ? 'active' : ''} onClick={() => onTabChange('instructions')}>Instructions</button><button className={tab === 'challenge' ? 'active' : ''} onClick={() => onTabChange('challenge')}>Challenge <small>{progress.passed}/{progress.total}</small></button></nav>
+      {tab === 'instructions' ? <div className="activity-instructions-body"><p className="activity-summary">{instruction.summary}</p>
         {!!instruction.objectives?.length && <section><h3>What you need to accomplish</h3><ul>{instruction.objectives.map(objective => <li key={objective}>{objective}</li>)}</ul></section>}
         {!!instruction.steps?.length && <section><h3>Steps</h3><ol>{instruction.steps.map(step => <li key={step}>{step}</li>)}</ol></section>}
         {!!instruction.hints?.length && <section><h3>Hints</h3><div className="activity-hints">{instruction.hints.map((hint, index) => revealed.includes(index) ? <p key={hint}>{hint}</p> : <button key={hint} onClick={() => { setRevealed(current => [...current, index]); onUseHint?.(`hint-${index + 1}`); }}>Reveal hint {index + 1}</button>)}</div></section>}
-      </div><footer><button className="button primary" onClick={onClose}>Continue activity</button></footer>
-    </section>
-  </div>;
+      </div> : <div className="activity-challenge-body">
+        <div className="activity-challenge-progress"><div><strong>{progress.passed} of {progress.total} complete</strong><span>{progress.total && progress.passed === progress.total ? 'Ready to check and complete' : `${Math.max(0, progress.total - progress.passed)} checks remaining`}</span></div><i><b style={{ width: `${progress.total ? progress.passed / progress.total * 100 : 0}%` }}/></i></div>
+        <section><h3>Devices and roles</h3>{evaluation?.roleStatus?.map(role => <div className={`activity-progress-item ${role.status}`} key={role.roleId}><i/><span><strong>{role.name}</strong><small>{role.compatible} of {role.required} assigned</small></span><b>{role.status === 'passed' ? 'Complete' : 'Needs work'}</b></div>)}</section>
+        <section><h3>Network requirements</h3>{evaluation?.requirements?.map(requirement => { const incomplete = requirement.checks?.find(check => check.status !== 'passed'); return <div className={`activity-progress-item ${requirement.status}`} key={requirement.id}><i/><span><strong>{requirementName(requirement)}</strong><small>{requirement.status === 'passed' ? 'All checks complete.' : requirement.reason || incomplete?.reason || 'Review this requirement.'}</small></span><b>{requirement.status === 'passed' ? 'Complete' : requirement.status === 'not_evaluable' ? 'Not ready' : 'Needs work'}</b></div>; })}</section>
+      </div>}
+  </aside>;
 }
 
 function ActivityResultModal({ result, level, onClose, onBack }) {
@@ -2048,6 +2135,7 @@ function PlatformApp() {
   const [activeActivity, setActiveActivity] = useState(null);
   const [dashboardRevision, setDashboardRevision] = useState(0);
   const [dashboardTab, setDashboardTab] = useState('classes');
+  const [difficultyWarning, setDifficultyWarning] = useState(null);
 
   useEffect(() => {
     api('/api/session').then(async result => {
@@ -2107,7 +2195,10 @@ function PlatformApp() {
   async function openSkillActivity(activityRecord, level = null, replaceOpen = false) {
     let attempt = (await api(`/api/skill-activities/${activityRecord.id}/open-attempt`)).attempt;
     if (level && attempt) {
-      if (!replaceOpen && !window.confirm(`Starting ${levelLabel(level)} will discard your current in-progress attempt. Continue?`)) return;
+      if (!replaceOpen) {
+        setDifficultyWarning({ activityRecord, level, currentLevel: attempt.requestedLevel });
+        return;
+      }
       await api(`/api/skill-attempts/${attempt.id}/abandon`, { method: 'POST' });
       attempt = null;
     }
@@ -2147,7 +2238,31 @@ function PlatformApp() {
     const saved = await api(`/api/projects/${project.id}`, { method: 'PUT', body: JSON.stringify({ name: project.name, document }) });
     setProject(current => ({ ...current, ...saved }));
   } : null}/>;
-  return <Dashboard key={dashboardRevision} user={user} initialTab={dashboardTab} onTabChange={showDashboardTab} onOpenProject={openProject} onOpenSkillActivity={openSkillActivity} onPreviewAssignment={openAssignmentPreview} onLogout={async () => { localStorage.removeItem(`packettracker-view-${user.id}`); await api('/api/auth/logout', { method: 'POST' }); setUser(null); }}/>
+  return <><Dashboard key={dashboardRevision} user={user} initialTab={dashboardTab} onTabChange={showDashboardTab} onOpenProject={openProject} onOpenSkillActivity={openSkillActivity} onPreviewAssignment={openAssignmentPreview} onLogout={async () => { localStorage.removeItem(`packettracker-view-${user.id}`); await api('/api/auth/logout', { method: 'POST' }); setUser(null); }}/>
+    {difficultyWarning && <DifficultyWarningModal
+      currentLevel={difficultyWarning.currentLevel}
+      nextLevel={difficultyWarning.level}
+      activityTitle={difficultyWarning.activityRecord.definition.title}
+      onCancel={() => setDifficultyWarning(null)}
+      onConfirm={() => { const pending = difficultyWarning; setDifficultyWarning(null); openSkillActivity(pending.activityRecord, pending.level, true); }}
+    />}
+  </>;
+}
+
+function DifficultyWarningModal({ currentLevel, nextLevel, activityTitle, onCancel, onConfirm }) {
+  useEffect(() => {
+    function handleKeyDown(event) { if (event.key === 'Escape') onCancel(); }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onCancel]);
+  return <div className="skill-warning-backdrop" onPointerDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
+    <section className="skill-warning-modal" role="alertdialog" aria-modal="true" aria-labelledby="skill-warning-title" aria-describedby="skill-warning-description">
+      <div className="skill-warning-icon"><TriangleAlert size={25}/></div>
+      <div className="skill-warning-copy"><span>Change difficulty</span><h2 id="skill-warning-title">Start {levelLabel(nextLevel)} instead?</h2><p id="skill-warning-description">You already have a {levelLabel(currentLevel)} attempt in progress for <strong>{activityTitle}</strong>. Starting at a different difficulty will discard the network and progress saved in that attempt.</p></div>
+      <div className="skill-warning-levels"><span><small>Current attempt</small><strong>{levelLabel(currentLevel)}</strong></span><ChevronRight size={17}/><span><small>New attempt</small><strong>{levelLabel(nextLevel)}</strong></span></div>
+      <footer><button className="button secondary" autoFocus onClick={onCancel}>Keep current attempt</button><button className="button skill-warning-confirm" onClick={onConfirm}>Discard and start {levelLabel(nextLevel)}</button></footer>
+    </section>
+  </div>;
 }
 
 function AuthScreen({ onAuthenticated }) {
@@ -2279,7 +2394,7 @@ function SkillActivityCard({ item, progress, attempts, onStart }) {
   };
   return <article className={`skill-activity-card ${expanded ? 'expanded' : 'collapsed'}`}>
     <button className="skill-card-toggle" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}><span>{expanded ? <ChevronDown size={18}/> : <ChevronRight size={18}/>}<strong>{item.definition.title}</strong></span></button>
-    <div className="skill-card-actions"><div className="skill-start-buttons">{openAttempt && <button className="button skill-resume-button" onClick={() => onStart(item)}>Resume {levelLabel(openAttempt.requestedLevel)}</button>}{levelButton('guided')}{levelButton('assisted')}{levelButton('independent')}</div></div>
+    <div className="skill-card-actions"><div className="skill-start-buttons">{openAttempt && <button className="button skill-resume-button" onClick={() => onStart(item)}>Resume {levelLabel(openAttempt.requestedLevel)}</button>}{levelButton('guided')}{levelButton('independent')}</div></div>
     {expanded && <div className="skill-card-details"><span>{item.definition.category}</span><p>{item.definition.description}</p><div>{item.definition.skills.map(skill => <small key={skill}>{skill.replaceAll('-', ' ')}</small>)}</div>{(openAttempt || progress) && <footer>{openAttempt && <span className="skill-in-progress"><RotateCcw size={13}/>{levelLabel(openAttempt.requestedLevel)} in progress</span>}{progress && <span className={`skill-level-badge ${progress.highestLevel}`}><GraduationCap size={14}/>Highest proficiency: {levelLabel(progress.highestLevel)}</span>}</footer>}</div>}
   </article>;
 }
@@ -2308,9 +2423,9 @@ function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, o
 
   const refresh = async () => {
     try {
-      const [dashboard, library, progress] = await Promise.all([api('/api/dashboard'), api('/api/skill-activities'), ...(user.role === 'student' ? [api('/api/skill-progress')] : [])]);
+      const [dashboard, library, progress] = await Promise.all([api('/api/dashboard'), api('/api/skill-activities'), api('/api/skill-progress')]);
       const activities = library.activities || [], activityAttempts = {};
-      if (user.role === 'student') await Promise.all(activities.map(async item => { activityAttempts[item.id] = (await api(`/api/skill-activities/${item.id}/attempts`)).attempts || []; }));
+      await Promise.all(activities.map(async item => { activityAttempts[item.id] = (await api(`/api/skill-activities/${item.id}/attempts`)).attempts || []; }));
       setData({ ...dashboard, activities, skillProgress: progress?.progress || [], skillTotals: progress?.totals || null, activityAttempts });
       if (user.role === 'teacher' && !classRosterInitializedRef.current) { setExpandedClasses((dashboard.classes || []).map(course => course.id)); classRosterInitializedRef.current = true; }
     } catch (requestError) { setError(requestError.message); }
@@ -2403,6 +2518,7 @@ function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, o
           {user.role === 'student' && <button className={teacherTab === 'assignments' ? 'active' : ''} onClick={() => selectDashboardTab('assignments')}><FilePlus2 size={18}/><span>Assignments</span><small>{data.assignments.length}</small></button>}
           <button className={teacherTab === 'classes' ? 'active' : ''} onClick={() => selectDashboardTab('classes')}><Users size={18}/><span>{user.role === 'teacher' ? 'Classes' : 'Class Info'}</span><small>{data.classes.length}</small></button>
           {user.role === 'teacher' && <button className={teacherTab === 'projects' ? 'active' : ''} onClick={() => selectDashboardTab('projects')}><FolderOpen size={18}/><span>Projects</span><small>{data.projects.length}</small></button>}
+          {user.role === 'teacher' && <button className={teacherTab === 'skills' ? 'active' : ''} onClick={() => selectDashboardTab('skills')}><GraduationCap size={18}/><span>Skills</span><small>{data.activities.length}</small></button>}
           {user.role === 'teacher' && <button className={teacherTab === 'assignments' ? 'active' : ''} onClick={() => selectDashboardTab('assignments')}><FilePlus2 size={18}/><span>Assignments</span><small>{data.assignments.length}</small></button>}
           {user.role === 'teacher' && <button className={teacherTab === 'shared' ? 'active' : ''} onClick={() => selectDashboardTab('shared')}><Share2 size={18}/><span>Shared with me</span><small>{data.sharedProjects.length}</small></button>}
         </nav>

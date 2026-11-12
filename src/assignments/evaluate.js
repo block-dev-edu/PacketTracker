@@ -109,7 +109,12 @@ export function evaluateAssignment(spec, devices, connections) {
         const policyIndex = policies.findIndex((policy, candidateIndex) => candidateIndex > previousIndex && policyMatches(policy, expected));
         const passed = policyIndex >= 0;
         if (passed) previousIndex = policyIndex;
-        checks.push(configurationCheck(`policy-${index + 1}`, passed ? 'passed' : 'failed', passed ? `Required policy ${index + 1} is configured in order.` : `Configure required policy ${index + 1} with the specified zones, protocol, addresses, and action.`));
+        const direction = `${expected.sourceZone || 'any'} to ${expected.destinationZone || 'any'}`;
+        const nearMatch = policies.find((policy, candidateIndex) => candidateIndex > previousIndex && ['sourceZone', 'destinationZone', 'sourceAddress', 'destinationAddress', 'action'].every(field => expected[field] == null || (policy[field] || 'any') === expected[field]));
+        const missingReason = nearMatch && expected.protocol && nearMatch.protocol !== expected.protocol
+          ? `Policy ${index + 1} from ${direction} must explicitly use protocol ${expected.protocol}; it currently uses ${nearMatch.protocol || 'any'}.`
+          : `Configure policy ${index + 1} from ${direction} with protocol ${expected.protocol || 'any'} and action ${expected.action}.`;
+        checks.push(configurationCheck(`policy-${index + 1}`, passed ? 'passed' : 'failed', passed ? `Policy ${index + 1} is configured in order with protocol ${expected.protocol || 'any'}.` : missingReason));
       }
       if (requirement.requireFinalDenyAll) {
         const final = policies.at(-1), passed = Boolean(final && policyMatches(final, { sourceZone: 'any', destinationZone: 'any', sourceAddress: 'any', destinationAddress: 'any', protocol: 'any', action: 'deny' }));

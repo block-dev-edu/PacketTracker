@@ -72,7 +72,7 @@ test('built-in attempts persist, resume, retain history, and only raise highest 
   assert.equal(service.getOpenAttempt(student, activity.id).id, assistedAttempt.id);
   const assistedCompletion = service.completeAttempt(student, assistedAttempt.id);
   assert.equal(assistedCompletion.evaluation.completed, true);
-  assert.equal(assistedCompletion.attempt.awardedLevel, 'assisted');
+  assert.equal(assistedCompletion.attempt.awardedLevel, 'guided');
   assert.throws(() => service.saveAttempt(student, assistedAttempt.id, { document: completedNetwork() }), error => error instanceof ActivityServiceError && error.status === 409);
 
   const independentAttempt = service.startAttempt(student, activity.id, 'independent');
@@ -83,10 +83,22 @@ test('built-in attempts persist, resume, retain history, and only raise highest 
   const progress = service.getStudentProgress(student);
   assert.equal(progress[0].highestLevel, 'independent');
   assert.deepEqual(service.getBuiltInTotals(student), { total: 1, completed: 1, incomplete: 0, guided: 0, assisted: 0, independent: 1 });
-  assert.deepEqual(service.getBuiltInSkillBreakdown(student), [{ activityId: activity.id, title: 'Connect two PCs', highestLevel: 'independent', completedLevels: ['guided', 'assisted', 'independent'] }]);
+  assert.deepEqual(service.getBuiltInSkillBreakdown(student), [{ activityId: activity.id, title: 'Connect two PCs', highestLevel: 'independent', completedLevels: ['guided', 'independent'] }]);
   assert.equal(service.attemptHistory(student, activity.id).length, 3);
   assert.equal(service.attemptHistory(teacher, activity.id, student.id).length, 3, 'an enrolled student’s built-in history should be available to their teacher');
   assert.equal(createActivityService(db).getStudentProgress(student)[0].highestLevel, 'independent', 'progress should survive service recreation');
+});
+
+test('teachers can see, attempt, complete, and retain their own skill progress', () => {
+  const { service, teacher } = fixture();
+  const activity = service.upsertBuiltInActivity(definition());
+  const attempt = service.startAttempt(teacher, activity.id, 'guided');
+  assert.equal(service.getOpenAttempt(teacher, activity.id).id, attempt.id);
+  assert.equal(service.getAttempt(teacher, attempt.id).studentId, teacher.id);
+  const completion = service.completeAttempt(teacher, attempt.id);
+  assert.equal(completion.evaluation.completed, true);
+  assert.equal(service.getStudentProgress(teacher)[0].highestLevel, 'guided');
+  assert.equal(service.attemptHistory(teacher, activity.id)[0].status, 'completed');
 });
 
 test('teacher activities enforce ownership, publication, and class or individual assignment access', () => {
@@ -193,4 +205,18 @@ test('the firewall activity requires two ordered policies followed by explicit d
   const result = evaluateActivityDefinition(basicFirewallPoliciesActivity, document);
   assert.equal(result.completed, true);
   assert.equal(result.requirements.find(item => item.id === 'ordered-firewall-policy').status, 'passed');
+});
+
+test('the firewall skill explains when a broad any rule must explicitly use ICMP', () => {
+  const document = structuredClone(basicFirewallPoliciesActivity.startingNetwork);
+  document.devices.find(device => device.instanceId === 'policy-firewall').firewall.policies = [
+    { sequence: 10, sourceZone: 'inside', destinationZone: 'outside', sourceAddress: 'any', destinationAddress: 'any', protocol: 'any', action: 'allow' },
+    { sequence: 20, sourceZone: 'outside', destinationZone: 'inside', sourceAddress: 'any', destinationAddress: 'any', protocol: 'any', action: 'deny' },
+    { sequence: 10000, sourceZone: 'any', destinationZone: 'any', sourceAddress: 'any', destinationAddress: 'any', protocol: 'any', action: 'deny' }
+  ];
+  const result = evaluateActivityDefinition(basicFirewallPoliciesActivity, document);
+  const policyChecks = result.requirements.find(item => item.id === 'ordered-firewall-policy').checks;
+  assert.equal(result.completed, false);
+  assert.match(policyChecks[0].reason, /must explicitly use protocol icmp; it currently uses any/);
+  assert.match(policyChecks[1].reason, /must explicitly use protocol icmp; it currently uses any/);
 });

@@ -156,7 +156,7 @@ export function createActivityService(db) {
       return db.prepare(`SELECT saa.id,saa.activity_id activityId,saa.class_id classId,saa.student_id studentId,saa.assigned_at assignedAt,c.name className,u.name studentName FROM skill_activity_assignments saa LEFT JOIN classes c ON c.id=saa.class_id LEFT JOIN users u ON u.id=saa.student_id WHERE saa.activity_id=? ORDER BY saa.assigned_at,saa.id`).all(activity.id);
     },
     startAttempt(actor, activityId, requestedLevel) {
-      if (actor?.role !== 'student') fail(403, 'Only students can start skill activity attempts');
+      if (!['student', 'teacher'].includes(actor?.role)) fail(403, 'A student or teacher account is required to start a skill activity');
       const activity = requireReadable(actor, activityId), definition = parse(activity.definition);
       if (!definition.supportedLevels.includes(requestedLevel)) fail(400, 'That proficiency level is not available for this activity');
       const result = db.prepare('INSERT INTO skill_activity_attempts (activity_id,student_id,activity_version,definition_snapshot,requested_level,working_document) VALUES (?,?,?,?,?,?)').run(activity.id, actor.id, activity.definition_version, activity.definition, requestedLevel, stringify(definition.startingNetwork));
@@ -165,12 +165,12 @@ export function createActivityService(db) {
     getAttempt(actor, attemptId) {
       const row = db.prepare('SELECT * FROM skill_activity_attempts WHERE id=?').get(attemptId);
       const activity = row && rawActivity(row.activity_id);
-      const teacherAccess = actor?.role === 'teacher' && teacherOwnsStudent(actor.id, row?.student_id) && (activity?.origin === 'built_in' || activity?.owner_id === actor.id);
+      const teacherAccess = actor?.role === 'teacher' && (row?.student_id === actor.id || (teacherOwnsStudent(actor.id, row?.student_id) && (activity?.origin === 'built_in' || activity?.owner_id === actor.id)));
       if (!row || (actor?.role === 'student' ? row.student_id !== actor.id : !teacherAccess)) fail(404, 'Activity attempt not found');
       return attemptRecord(row);
     },
     getOpenAttempt(actor, activityId) {
-      if (actor?.role !== 'student') fail(403, 'Only students can resume attempts');
+      if (!['student', 'teacher'].includes(actor?.role)) fail(403, 'A student or teacher account is required to resume a skill activity');
       requireReadable(actor, activityId);
       return attemptRecord(db.prepare("SELECT * FROM skill_activity_attempts WHERE activity_id=? AND student_id=? AND status='in_progress' ORDER BY updated_at DESC LIMIT 1").get(activityId, actor.id));
     },
@@ -196,7 +196,7 @@ export function createActivityService(db) {
       const activity = requireReadable(actor, row.activity_id), evaluation = evaluateActivityDefinition(parse(row.definition_snapshot || activity.definition), parse(row.working_document));
       db.prepare('UPDATE skill_activity_attempts SET evaluation_result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(stringify(evaluation), row.id);
       if (!evaluation.completed) return { attempt: attemptRecord(db.prepare('SELECT * FROM skill_activity_attempts WHERE id=?').get(row.id)), evaluation };
-      const awarded = row.requested_level === 'independent' && row.command_assistance_used ? 'assisted' : row.requested_level;
+      const awarded = row.requested_level === 'independent' && row.command_assistance_used ? 'guided' : row.requested_level;
       const completedAt = new Date().toISOString();
       db.prepare("UPDATE skill_activity_attempts SET status='completed',awarded_level=?,completed_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(awarded, completedAt, row.id);
       const rank = proficiencyRank(awarded);
@@ -211,7 +211,7 @@ export function createActivityService(db) {
     getStudentProgress(actor, studentId = actor?.id) {
       const targetId = Number(studentId);
       if (actor?.role === 'student' && targetId !== actor.id) fail(403, 'Students can only view their own progress');
-      if (actor?.role === 'teacher' && !db.prepare('SELECT 1 FROM enrollments e JOIN classes c ON c.id=e.class_id WHERE e.student_id=? AND c.teacher_id=?').get(targetId, actor.id)) fail(404, 'Student not found in one of your classes');
+      if (actor?.role === 'teacher' && targetId !== actor.id && !db.prepare('SELECT 1 FROM enrollments e JOIN classes c ON c.id=e.class_id WHERE e.student_id=? AND c.teacher_id=?').get(targetId, actor.id)) fail(404, 'Student not found in one of your classes');
       const rows = db.prepare(`SELECT sap.*,sa.activity_key,sa.definition FROM skill_activity_progress sap JOIN skill_activities sa ON sa.id=sap.activity_id WHERE sap.student_id=? ORDER BY sap.completed_at DESC`).all(targetId);
       return rows.map(row => ({ activityId: row.activity_id, activityKey: row.activity_key, title: parse(row.definition).title, highestLevel: row.highest_level, attemptId: row.attempt_id, completedAt: row.completed_at }));
     },
@@ -243,7 +243,8 @@ export function createActivityService(db) {
       if (actor?.role === 'student' && targetId !== actor.id) fail(403, 'Students can only view their own attempts');
       if (actor?.role === 'teacher') {
         const activity = rawActivity(activityId);
-        if (!activity || !teacherOwnsStudent(actor.id, targetId) || (activity.origin !== 'built_in' && activity.owner_id !== actor.id)) fail(404, 'Skill activity not found');
+        const ownHistory = targetId === actor.id;
+        if (!activity || (!ownHistory && (!teacherOwnsStudent(actor.id, targetId) || (activity.origin !== 'built_in' && activity.owner_id !== actor.id)))) fail(404, 'Skill activity not found');
       } else requireReadable(actor, activityId);
       return db.prepare('SELECT * FROM skill_activity_attempts WHERE activity_id=? AND student_id=? ORDER BY started_at DESC,id DESC').all(activityId, targetId).map(attemptRecord);
     }
