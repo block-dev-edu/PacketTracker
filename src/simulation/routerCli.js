@@ -1,4 +1,5 @@
 import { contextHelp, isHelpRequest } from './cliHelp.js';
+import { intToIp, ipToInt, isInSubnet } from './ip.js';
 
 const clone = value => structuredClone(value);
 
@@ -17,6 +18,7 @@ export function executeRouterCommand(session, currentConfig, currentInterfaces, 
   const lower = command.toLowerCase().replace(/\s+/g, ' ');
   const nextSession = { ...session };
   const config = clone(currentConfig);
+  config.routes ||= [];
   const interfaces = clone(currentInterfaces || {});
   let output = [], saved = false;
   if (!command) return { session: nextSession, config, interfaces, output, saved };
@@ -34,15 +36,30 @@ export function executeRouterCommand(session, currentConfig, currentInterfaces, 
     if (lower === 'disable') nextSession.mode = 'user';
     else if (lower === 'configure terminal' || lower === 'conf t') nextSession.mode = 'config';
     else if (lower === 'show ip interface brief' || lower === 'show ip int brief') output = showIpInterfaces(config, interfaces);
-    else if (lower === 'show ip route') output = showRoutes(interfaces);
+    else if (lower === 'show ip route') output = showRoutes(interfaces, config);
     else if (lower === 'show running-config' || lower === 'show run') output = runningConfig(config, interfaces);
     else if (lower === 'write memory' || lower === 'copy running-config startup-config') saved = true;
     else output = [`% Unknown command: ${command}`, 'Type ? for available commands.'];
   } else if (session.mode === 'config') {
     const hostname = command.match(/^hostname\s+([a-z0-9][a-z0-9-]{0,31})$/i);
+    const route = command.match(/^ip\s+route\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})$/i);
+    const noRoute = command.match(/^no\s+ip\s+route\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})(?:\s+(\d{1,3}(?:\.\d{1,3}){3}))?$/i);
     const iface = parseInterface(command);
     const noIface = parseInterface(command.replace(/^no\s+/i, ''));
     if (hostname) config.hostname = hostname[1];
+    else if (route) {
+      const prefix = maskToPrefix(route[2]);
+      if (prefix === null || !validIp(route[1]) || !validIp(route[3])) output = ['% Invalid route address or subnet mask.'];
+      else if (!Object.values(interfaces).some(value => value.address && isInSubnet(route[3], value.address, value.prefix))) output = ['% Next hop is not reachable through a configured interface.'];
+      else {
+        const network = intToIp(ipToInt(route[1]) & (prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0));
+        config.routes = config.routes.filter(item => !(item.network === network && Number(item.prefix) === prefix));
+        config.routes.push({ network, prefix, nextHop: route[3] });
+      }
+    } else if (noRoute) {
+      const prefix = maskToPrefix(noRoute[2]);
+      config.routes = config.routes.filter(item => !(item.network === noRoute[1] && Number(item.prefix) === prefix && (!noRoute[3] || item.nextHop === noRoute[3])));
+    }
     else if (iface) {
       const parent = iface.portId;
       if (!config.ports[parent]) output = [`% ${iface.display} does not exist.`];
@@ -109,7 +126,7 @@ function help(session, config) {
   const mode = session.mode;
   if (mode === 'user') return ['enable                         Enter privileged mode'];
   if (mode === 'privileged') return ['configure terminal             Enter global configuration mode', 'disable                        Return to user mode', 'exit                           Close the command-line session', 'show ip interface brief        List interface addressing', 'show ip route                  Show connected routes', 'show running-config            Display the active configuration', 'write memory                   Save the active configuration'];
-  if (mode === 'config') return ['end                            Return to privileged mode', 'exit                           Return to privileged mode', 'hostname <name>                Set the router hostname', 'interface ethernet <1-4>       Select a physical interface', 'interface ethernet <n>.<unit>  Create or select a VLAN subinterface', 'no interface ethernet <n>.<unit>  Remove a VLAN subinterface'];
+  if (mode === 'config') return ['end                            Return to privileged mode', 'exit                           Return to privileged mode', 'hostname <name>                Set the router hostname', 'interface ethernet <1-4>       Select a physical interface', 'interface ethernet <n>.<unit>  Create or select a VLAN subinterface', 'ip route <network> <mask> <next-hop>  Add a static or default route', 'no interface ethernet <n>.<unit>  Remove a VLAN subinterface', 'no ip route <network> <mask> [next-hop]  Remove a route'];
   const common = ['end                            Return to privileged mode', 'exit                           Return to global configuration mode', 'ip address <ip> <mask>         Assign an address and subnet mask', 'ip address <ip>/<prefix>       Assign an address using CIDR notation', 'no ip address                  Remove the interface address', 'no shutdown                    Enable the interface', 'shutdown                       Disable the interface'];
   if (config.subinterfaces[session.interfaceId]) return ['encapsulation dot1Q <vlan>    Assign IEEE 802.1Q VLAN tagging', 'no encapsulation dot1Q         Remove VLAN tagging', ...common];
   return common;
@@ -122,8 +139,8 @@ function showIpInterfaces(config, interfaces) {
   return lines;
 }
 
-function showRoutes(interfaces) {
-  return ['CONNECTED ROUTES', ...Object.entries(interfaces).filter(([, config]) => config.address).map(([id, config]) => `C  ${config.address}/${config.prefix} is directly connected, ${formatInterface(id)}`)];
+function showRoutes(interfaces, config = null) {
+  return ['ROUTING TABLE', ...Object.entries(interfaces).filter(([, value]) => value.address).map(([id, value]) => `C  ${value.address}/${value.prefix} is directly connected, ${formatInterface(id)}`), ...(config?.routes || []).map(route => `S  ${route.network}/${route.prefix} via ${route.nextHop}`)];
 }
 
 function runningConfig(config, interfaces) {
@@ -139,8 +156,12 @@ function runningConfig(config, interfaces) {
     if (interfaces[id]?.address) lines.push(` ip address ${interfaces[id].address}/${interfaces[id].prefix}`);
     if (!sub.enabled) lines.push(' shutdown');
   }
+  for (const route of config.routes || []) lines.push('!', `ip route ${route.network} ${prefixToMask(route.prefix)} ${route.nextHop}`);
   return lines;
 }
+
+function validIp(value) { try { ipToInt(value); return value.split('.').every(part => Number(part) >= 0 && Number(part) <= 255); } catch { return false; } }
+function prefixToMask(prefix) { const mask = Number(prefix) === 0 ? 0 : (0xffffffff << (32 - Number(prefix))) >>> 0; return intToIp(mask); }
 
 function formatInterface(id) {
   const [parent, unit] = id.split('.');

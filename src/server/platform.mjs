@@ -82,7 +82,14 @@ if (assignmentColumns.some(column => column.name === 'class_id')) {
 installActivitySchema(db);
 const activityService = createActivityService(db);
 function seedBuiltInActivityCatalog() {
-  for (const definition of builtInActivities) activityService.upsertBuiltInActivity(definition);
+  db.exec('BEGIN');
+  try {
+    for (const definition of builtInActivities) activityService.upsertBuiltInActivity(definition);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }
 seedBuiltInActivityCatalog();
 
@@ -266,6 +273,7 @@ export function installPlatformApi(app) {
   app.post('/api/skill-activities/:id/attempts', requireUser, activityEndpoint((request, response) => response.status(201).json(activityService.startAttempt(request.user, Number(request.params.id), request.body?.level))));
   app.get('/api/skill-activities/:id/open-attempt', requireUser, activityEndpoint((request, response) => response.json({ attempt: activityService.getOpenAttempt(request.user, Number(request.params.id)) })));
   app.get('/api/skill-activities/:id/attempts', requireUser, activityEndpoint((request, response) => response.json({ attempts: activityService.attemptHistory(request.user, Number(request.params.id), request.query.studentId || request.user.id) })));
+  app.get('/api/skill-attempts', requireUser, activityEndpoint((request, response) => response.json({ activityAttempts: activityService.ownAttemptHistory(request.user) })));
   app.get('/api/skill-attempts/:id', requireUser, activityEndpoint((request, response) => response.json(activityService.getAttempt(request.user, Number(request.params.id)))));
   app.put('/api/skill-attempts/:id', requireUser, activityEndpoint((request, response) => response.json(activityService.saveAttempt(request.user, Number(request.params.id), request.body))));
   app.post('/api/skill-attempts/:id/evaluate', requireUser, activityEndpoint((request, response) => response.json(activityService.evaluateAttempt(request.user, Number(request.params.id)))));

@@ -175,6 +175,7 @@ export class NetworkSimulation {
     }
     for (const link of this.links) {
       const aDevice = this.getDevice(link.a.deviceId), bDevice = this.getDevice(link.b.deviceId);
+      if (!this.portSecurityAllows(aDevice, link.a.portId, bDevice) || !this.portSecurityAllows(bDevice, link.b.portId, aDevice)) continue;
       const aTrunk = trunkVlans(aDevice, link.a.portId), bTrunk = trunkVlans(bDevice, link.b.portId);
       if (aTrunk && bTrunk) {
         for (const vlan of aTrunk.filter(id => bTrunk.includes(id))) union(`${portKey(link.a.deviceId, link.a.portId)}@${vlan}`, `${portKey(link.b.deviceId, link.b.portId)}@${vlan}`);
@@ -193,6 +194,13 @@ export class NetworkSimulation {
 
   domainFor(deviceId, portId) {
     return this.getDomains().find(domain => domain.includes(portKey(deviceId, portId))) || [];
+  }
+
+  portSecurityAllows(device, portId, peer) {
+    const security = device.switching?.ports?.[portId]?.portSecurity;
+    if (!security?.enabled) return true;
+    const allowed = (security.allowedMacs || []).map(value => String(value).toLowerCase());
+    return allowed.length > 0 && allowed.includes(String(peer.macAddress || '').toLowerCase()) && Number(security.maximum || 1) >= 1;
   }
 
   interfaceBindings() {
@@ -286,6 +294,13 @@ export class NetworkSimulation {
       .filter(([, config]) => config.address && isInSubnet(destinationIp, config.address, config.prefix))
       .sort((a, b) => b[1].prefix - a[1].prefix);
     if (candidates.length) return { interfaceId: candidates[0][0], gateway: null };
+    const staticRoute = [...(device.routerConfig?.routes || [])]
+      .filter(route => { try { return isInSubnet(destinationIp, route.network, Number(route.prefix)); } catch { return false; } })
+      .sort((left, right) => Number(right.prefix) - Number(left.prefix))[0];
+    if (staticRoute) {
+      const outgoing = Object.entries(device.interfaces).find(([, config]) => config.address && isInSubnet(staticRoute.nextHop, config.address, config.prefix));
+      if (outgoing) return { interfaceId: outgoing[0], gateway: staticRoute.nextHop };
+    }
     if (device.gateway) {
       const defaultInterface = Object.entries(device.interfaces).find(([, config]) => config.address && isInSubnet(device.gateway, config.address, config.prefix));
       if (defaultInterface) return { interfaceId: defaultInterface[0], gateway: device.gateway };
@@ -301,11 +316,12 @@ export class NetworkSimulation {
     const policies = [...(device.firewall.policies || [])].filter(rule => rule.action).sort((a, b) => a.sequence - b.sequence);
     if (policies.length) {
       const sourceZone = this.interfaceZone(device, incoming), destinationZone = this.interfaceZone(device, outgoing);
-      const reverseState = `${device.id}|${packet.protocol}|${packet.destinationIp}|${packet.sourceIp}`;
+      const reverseState = connectionStateKey(device.id, packet.protocol, packet.destinationIp, packet.destinationPort, packet.sourceIp, packet.sourcePort);
       if (reply && device.firewall.mode === 'stateful' && this.connectionStates.has(reverseState)) return true;
-      const rule = policies.find(item => (item.sourceZone === 'any' || item.sourceZone === sourceZone) && (item.destinationZone === 'any' || item.destinationZone === destinationZone) && addressMatches(item.sourceAddress, packet.sourceIp) && addressMatches(item.destinationAddress, packet.destinationIp) && (item.protocol === 'any' || item.protocol === packet.protocol));
+      const zoneMatches = (configured, actual) => String(configured || 'any').toLowerCase() === 'any' || String(configured).toLowerCase() === String(actual).toLowerCase();
+      const rule = policies.find(item => zoneMatches(item.sourceZone, sourceZone) && zoneMatches(item.destinationZone, destinationZone) && addressMatches(item.sourceAddress, packet.sourceIp) && addressMatches(item.destinationAddress, packet.destinationIp) && (!item.protocol || item.protocol === 'any' || item.protocol === packet.protocol) && portMatches(item.sourcePort, packet.sourcePort) && portMatches(item.destinationPort, packet.destinationPort));
       const allowed = (rule?.action || 'allow') === 'allow';
-      if (allowed && device.firewall.mode === 'stateful') this.connectionStates.add(`${device.id}|${packet.protocol}|${packet.sourceIp}|${packet.destinationIp}`);
+      if (allowed && device.firewall.mode === 'stateful') this.connectionStates.add(connectionStateKey(device.id, packet.protocol, packet.sourceIp, packet.sourcePort, packet.destinationIp, packet.destinationPort));
       return allowed;
     }
     if (device.firewall.mode === 'stateful') {
@@ -350,4 +366,13 @@ function addressMatches(match, address) {
   const [network, prefixText] = match.split('/');
   try { return isInSubnet(address, network, Number(prefixText)); }
   catch { return false; }
+}
+
+function portMatches(match, port) {
+  if (match == null || match === 'any') return true;
+  return Number(match) === Number(port);
+}
+
+function connectionStateKey(deviceId, protocol, sourceIp, sourcePort, destinationIp, destinationPort) {
+  return `${deviceId}|${protocol}|${sourceIp}|${sourcePort ?? '-'}|${destinationIp}|${destinationPort ?? '-'}`;
 }

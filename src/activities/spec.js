@@ -20,6 +20,7 @@ export function validateActivityDefinition(input) {
   if (!text(input.title)) errors.push('title is required.');
   if (!text(input.description)) errors.push('description is required.');
   if (!text(input.category)) errors.push('category is required.');
+  if (input.progressionOrder != null && (!Number.isInteger(input.progressionOrder) || input.progressionOrder < 1)) errors.push('progressionOrder must be a positive integer when provided.');
   if (!uniqueText(input.skills).length) errors.push('skills must contain at least one skill identifier.');
   if (!validNetworkSnapshot(input.startingNetwork)) errors.push('startingNetwork must contain devices and connections arrays.');
 
@@ -58,6 +59,7 @@ export function normalizeActivityDefinition(input) {
     schemaVersion: ACTIVITY_SCHEMA_VERSION,
     key: text(input.key), title: text(input.title), description: text(input.description), category: text(input.category),
     skills: uniqueText(input.skills),
+    ...(Number.isInteger(input.progressionOrder) ? { progressionOrder: input.progressionOrder } : {}),
     startingNetwork: structuredClone(input.startingNetwork),
     instructions,
     supportedLevels,

@@ -82,11 +82,25 @@ export function executeSwitchCommand(session, currentSwitching, rawCommand) {
 
   if (session.mode === 'interface') {
     const port = switching.ports[session.interfaceId];
+    const portSecurity = () => (port.portSecurity ||= { enabled: false, maximum: 1, allowedMacs: [], violation: 'shutdown' });
     const accessVlan = command.match(/^switchport\s+access\s+vlan\s+(\d{1,4})$/i);
     const description = command.match(/^description\s+(.{1,64})$/i);
     const allowedVlans = command.match(/^switchport\s+trunk\s+allowed\s+vlan\s+([\d, -]+)$/i);
     const encapsulationWithVlan = command.match(/^(?:switchport trunk )?encapsulation\s+dot1q\s+(\d+)$/i);
+    const securityMaximum = command.match(/^switchport\s+port-security\s+maximum\s+(\d+)$/i);
+    const securityMac = command.match(/^switchport\s+port-security\s+mac-address\s+([0-9a-f:.-]+)$/i);
+    const securityViolation = command.match(/^switchport\s+port-security\s+violation\s+(shutdown|restrict|protect)$/i);
     if (lower === 'switchport mode access') port.mode = 'access';
+    else if (lower === 'switchport port-security') portSecurity().enabled = true;
+    else if (lower === 'no switchport port-security') portSecurity().enabled = false;
+    else if (securityMaximum) {
+      const maximum = Number(securityMaximum[1]);
+      if (maximum < 1 || maximum > 16) output = ['% Port-security maximum must be between 1 and 16.']; else portSecurity().maximum = maximum;
+    } else if (securityMac) {
+      const mac = normalizeMac(securityMac[1]);
+      if (!mac) output = ['% Invalid MAC address.'];
+      else if (!portSecurity().allowedMacs.includes(mac)) portSecurity().allowedMacs.push(mac);
+    } else if (securityViolation) portSecurity().violation = securityViolation[1].toLowerCase();
     else if (lower === 'switchport trunk encapsulation dot1q' || lower === 'encapsulation dot1q') port.encapsulation = 'dot1q';
     else if (encapsulationWithVlan) output = ['% Switch trunk encapsulation does not take a VLAN ID.', 'Use "switchport trunk encapsulation dot1q", then "switchport trunk allowed vlan <list>".'];
     else if (lower === 'no switchport trunk encapsulation' || lower === 'no encapsulation dot1q') delete port.encapsulation;
@@ -117,7 +131,7 @@ function helpForMode(mode) {
   if (mode === 'privileged') return ['configure terminal             Enter global configuration mode', 'disable                        Return to user mode', 'exit                           Close the command-line session', 'show interfaces status         List port status and VLAN membership', 'show running-config            Display the active configuration', 'show vlan brief                List VLANs and access ports', 'write memory                   Save the active configuration'];
   if (mode === 'config') return ['end                            Return to privileged mode', 'exit                           Return to privileged mode', 'hostname <name>                Set the switch hostname', 'interface ethernet <1-8>       Select a physical port', 'no vlan <1-4094>               Remove an unused VLAN', 'vlan <1-4094>                  Create or edit a VLAN'];
   if (mode === 'vlan') return ['end                            Return to privileged mode', 'exit                           Return to global configuration mode', 'name <name>                    Name the selected VLAN'];
-  return ['description <text>             Describe the port', 'end                            Return to privileged mode', 'exit                           Return to global configuration mode', 'no description                 Remove the port description', 'no shutdown                    Enable the port', 'no switchport trunk encapsulation  Remove explicit trunk encapsulation', 'shutdown                       Disable the port', 'switchport access vlan <id>    Assign the access VLAN', 'switchport mode access         Configure an access port', 'switchport mode trunk          Carry 802.1Q tagged VLANs', 'switchport trunk allowed vlan <list>  Set the VLANs allowed on the trunk', 'switchport trunk encapsulation dot1q  Use IEEE 802.1Q tagging'];
+  return ['description <text>             Describe the port', 'end                            Return to privileged mode', 'exit                           Return to global configuration mode', 'no description                 Remove the port description', 'no shutdown                    Enable the port', 'no switchport port-security    Disable port security', 'no switchport trunk encapsulation  Remove explicit trunk encapsulation', 'shutdown                       Disable the port', 'switchport access vlan <id>    Assign the access VLAN', 'switchport mode access         Configure an access port', 'switchport mode trunk          Carry 802.1Q tagged VLANs', 'switchport port-security       Enable port security', 'switchport port-security mac-address <mac>  Permit a MAC address', 'switchport port-security maximum <1-16>  Limit learned addresses', 'switchport port-security violation shutdown|restrict|protect  Set violation action', 'switchport trunk allowed vlan <list>  Set the VLANs allowed on the trunk', 'switchport trunk encapsulation dot1q  Use IEEE 802.1Q tagging'];
 }
 
 function showVlans(switching) {
@@ -143,10 +157,16 @@ function runningConfig(switching) {
     if (port.mode === 'trunk') lines.push(` switchport trunk encapsulation ${port.encapsulation || 'dot1q'}`, ` switchport trunk allowed vlan ${(port.allowedVlans || []).join(',') || 'all'}`);
     else lines.push(` switchport access vlan ${port.accessVlan}`);
     if (port.description) lines.push(` description ${port.description}`);
+    if (port.portSecurity?.enabled) {
+      lines.push(' switchport port-security', ` switchport port-security maximum ${port.portSecurity.maximum || 1}`, ` switchport port-security violation ${port.portSecurity.violation || 'shutdown'}`);
+      for (const mac of port.portSecurity.allowedMacs || []) lines.push(` switchport port-security mac-address ${mac}`);
+    }
     if (!port.enabled) lines.push(' shutdown');
   }
   return lines;
 }
+
+function normalizeMac(value) { const compact = String(value).toLowerCase().replace(/[^0-9a-f]/g, ''); return /^[0-9a-f]{12}$/.test(compact) ? compact.match(/../g).join(':') : null; }
 
 function formatPort(id) {
   return `Ethernet ${Number(id.replace('eth', '')) + 1}`;

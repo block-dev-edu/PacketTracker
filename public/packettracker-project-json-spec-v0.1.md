@@ -9,10 +9,10 @@ The first importer intentionally supports architecture and reachability assignme
 - Endpoint role types: `pc`, `laptop`, `server`, and `ip-phone`.
 - Exact role counts with one assignment role per placed endpoint.
 - `relationships` at `layer: "l2"` or `layer: "l3"`.
-- Layer 3 currently uses deterministic ICMP reachability only (`protocol: "icmp"`).
+- Layer 3 supports deterministic ICMP reachability plus TCP or UDP checks with a numeric `destinationPort` from 1 to 65535. ICMP relationships omit port fields.
 - `allow` and `deny` are directional and evaluated for every assigned source/destination pair.
 - Constraint type `separate_l2_domains`.
-- Unsupported services, Internet rules, protocols, device types, and constraint types cause import validation errors.
+- Unsupported services, Internet rules, protocols, device types, ports, and constraint types cause import validation errors.
 
 Role assignment is assessment metadata only. In an assignment project, a student right-clicks a compatible endpoint and chooses **Assign role**.
 

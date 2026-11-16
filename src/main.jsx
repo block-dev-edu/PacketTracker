@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import {
   AppWindow, Box, Cable, ChevronDown, ChevronRight, CircleHelp, Cloud, Cpu,
-  Copy, Database, Download, Ellipsis, EthernetPort, FilePlus2, Gauge, Grid3X3,
+  Copy, Database, Download, EthernetPort, FilePlus2, Gauge, Grid3X3,
   FolderOpen, Globe2, HardDrive, Headphones, HousePlug, Laptop, LockKeyhole, Mail, Menu, Minus, Monitor,
   Moon, MousePointer2, Network, PanelLeftClose, PanelLeftOpen, Phone, Plus, Printer,
   Pencil, RadioTower, Redo2, RotateCcw, Router, Save, Scan, Search, Server, ShieldCheck,
@@ -16,7 +17,7 @@ import { createNgfwCliSession, executeNgfwCommand, ngfwPrompt } from './simulati
 import { createRouterCliSession, executeRouterCommand, routerPrompt } from './simulation/routerCli.js';
 import { createFirewallCliSession, executeFirewallCommand, firewallPrompt } from './simulation/firewallPolicyCli.js';
 import { findDuplicateIpConflicts, validateConnections } from './simulation/connectionValidation.js';
-import { devicePrimaryAddress, runPing } from './simulation/ping.js';
+import { broadcastRecipients, devicePrimaryAddress, runPing } from './simulation/ping.js';
 import { evaluateAssignment } from './assignments/evaluate.js';
 
 const categories = [
@@ -69,6 +70,7 @@ const CANVAS_ORIGIN_X = 1800;
 const CANVAS_ORIGIN_Y = 1200;
 const GRID_SIZE = 20;
 const MIN_ZOOM = 20;
+const MAX_ZOOM = 250;
 
 const serverRoles = [
   { id: 'generic', name: 'Generic Server', icon: Server, purpose: 'A configurable host for custom network services.', capabilities: ['ip'] },
@@ -193,8 +195,8 @@ Begin by asking:
 Ask follow-up questions whenever an answer is ambiguous. Explain these PacketTracker limits before accepting requirements:
 - Supported assessed endpoint device types are only "pc", "laptop", "server", and "ip-phone".
 - A role represents endpoint devices, not routers, switches, firewalls, VLANs, departments without devices, or Internet services.
-- Supported checks are Layer 2 domain reachability and Layer 3 ICMP reachability.
-- Layer 3 protocol must be "icmp". HTTP, HTTPS, DNS, email, files, applications, ports, dynamic routing, VPN behavior, IPS, and content inspection cannot currently be graded.
+- Supported checks are Layer 2 domain reachability and Layer 3 TCP, UDP, or ICMP reachability.
+- TCP and UDP checks require a numeric destinationPort from 1 to 65535. Students should enter port numbers rather than service names. Dynamic routing, VPN behavior, IPS, and content inspection cannot currently be graded.
 - A directional allow or deny rule must be explicit. A→B does not imply B→A.
 - The only supported constraint is "separate_l2_domains".
 - Do not invent device types, services, constraint types, or fields outside this contract.
@@ -204,12 +206,12 @@ Required JSON shape:
   "schemaVersion": "0.1",
   "scenario": { "id": "lowercase-stable-id", "title": "Title", "description": "Student-facing instructions", "objectives": ["Optional objective"] },
   "roles": [ { "id": "role-id", "name": "Display name", "deviceTypes": ["pc"], "count": 1 } ],
-  "relationships": [ { "id": "unique-check-id", "from": "source-role-id", "to": "destination-role-id", "action": "allow", "layer": "l3", "protocol": "icmp" } ],
+  "relationships": [ { "id": "unique-check-id", "from": "source-role-id", "to": "destination-role-id", "action": "allow", "layer": "l3", "protocol": "tcp", "destinationPort": 443 } ],
   "constraints": [ { "id": "unique-constraint-id", "type": "separate_l2_domains", "roles": ["role-a", "role-b"] } ],
   "settings": { "allowExtraDevices": true, "showLiveProgress": true, "showFailureReasons": true }
 }
 
-For Layer 2 relationships use "layer": "l2" and omit protocol. Counts must be integers of at least 1. All referenced role IDs must exist. Do not add services or internet sections. Before producing JSON, summarize the proposed roles and directional checks and ask the teacher to confirm. Then output valid JSON only.`;
+For ICMP relationships omit sourcePort and destinationPort. For Layer 2 relationships use "layer": "l2" and omit protocol and ports. Counts must be integers of at least 1. All referenced role IDs must exist. Do not add services or internet sections. Before producing JSON, summarize the proposed roles, numeric ports, and directional checks and ask the teacher to confirm. Then output valid JSON only.`;
 
 function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
   const dx = x2 - x1, dy = y2 - y1;
@@ -294,12 +296,13 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   const [query, setQuery] = useState('');
   const [placed, setPlaced] = useState(() => loadSavedDesign(draft?.devices ?? project?.document?.devices));
   const [selected, setSelected] = useState(null);
-  const [zoom, setZoom] = useState(() => Math.max(MIN_ZOOM, Math.min(150, Number(savedEditorView.zoom) || 100)));
+  const [zoom, setZoom] = useState(() => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(savedEditorView.zoom) || 100)));
   const [gridLock, setGridLock] = useState(savedEditorView.gridLock === true);
   const [sidebarOpen, setSidebarOpen] = useState(savedEditorView.sidebarOpen !== false);
   const [inspectorWidth, setInspectorWidth] = useState(() => Math.max(260, Math.min(640, Number(localStorage.getItem('packettracker-inspector-width')) || 292)));
   const [toast, setToast] = useState('');
   const [profileOpen, setProfileOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [serverPickerOpen, setServerPickerOpen] = useState(false);
   const [serverRoleDraft, setServerRoleDraft] = useState('generic');
   const [serverPickerTarget, setServerPickerTarget] = useState(null);
@@ -316,16 +319,18 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   const [selectedConnection, setSelectedConnection] = useState(null);
   const [inspectorPanel, setInspectorPanel] = useState(savedEditorView.inspectorPanel || 'details');
   const [contextMenu, setContextMenu] = useState(null);
+  const [broadcast, setBroadcast] = useState(null);
   const [pingDialog, setPingDialog] = useState(null);
   const [cliDeviceId, setCliDeviceId] = useState(null);
   const [cancelToken, setCancelToken] = useState(0);
   const [isPanning, setIsPanning] = useState(false);
   const [assignmentPanelOpen, setAssignmentPanelOpen] = useState(false);
   const [assignmentPanelCategory, setAssignmentPanelCategory] = useState('overview');
-  const [activityHelpOpen, setActivityHelpOpen] = useState(() => activity ? savedEditorView.activityHelpOpen !== false : false);
+  const [activityHelpOpen, setActivityHelpOpen] = useState(false);
   const [activityPanelTab, setActivityPanelTab] = useState(() => ['instructions', 'challenge'].includes(savedEditorView.activityPanelTab) ? savedEditorView.activityPanelTab : 'instructions');
   const [activityPanelWidth, setActivityPanelWidth] = useState(() => Math.max(300, Math.min(650, Number(localStorage.getItem('packettracker-activity-panel-width')) || 390)));
   const [activityResult, setActivityResult] = useState(null);
+  const [completionTakeover, setCompletionTakeover] = useState(null);
   const [activityBusy, setActivityBusy] = useState(false);
   const [activitySaveState, setActivitySaveState] = useState('saved');
   const [connections, setConnections] = useState(() => {
@@ -360,7 +365,18 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   const connectMode = activeTool === 'connect';
   const connectionActive = connectMode || Boolean(pendingPort) || Boolean(portPicker);
   const activitySaveRef = useRef(onActivitySave);
+  const broadcastTimerRef = useRef(null);
+  const completionTimerRef = useRef(null);
+  const completionCameraFrameRef = useRef(null);
+  const completionCameraAnimatingRef = useRef(false);
+  const completionSurfaceSnapshotRef = useRef(null);
+  const celebratedAttemptsRef = useRef(new Set());
   useEffect(() => { activitySaveRef.current = onActivitySave; }, [onActivitySave]);
+  useEffect(() => () => {
+    clearTimeout(broadcastTimerRef.current);
+    clearTimeout(completionTimerRef.current);
+    cancelAnimationFrame(completionCameraFrameRef.current);
+  }, []);
 
   useEffect(() => {
     if (canvasInitializedRef.current || !canvasRef.current) return;
@@ -370,6 +386,14 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     canvas.scrollLeft = Number.isFinite(savedEditorView.scrollLeft) ? savedEditorView.scrollLeft : Math.max(0, CANVAS_ORIGIN_X * scale - 100);
     canvas.scrollTop = Number.isFinite(savedEditorView.scrollTop) ? savedEditorView.scrollTop : Math.max(0, CANVAS_ORIGIN_Y * scale - 80);
   }, [zoom]);
+
+  useEffect(() => {
+    let layoutFrame;
+    const mountFrame = requestAnimationFrame(() => {
+      layoutFrame = requestAnimationFrame(() => autoZoomCanvas());
+    });
+    return () => { cancelAnimationFrame(mountFrame); if (layoutFrame) cancelAnimationFrame(layoutFrame); };
+  }, [project?.id]);
 
   const filtered = useMemo(() => devices.filter(device =>
     (query ? `${device.name} ${device.model || ''} ${device.purpose || ''} ${featureLabels(device.capabilities).join(' ')}`.toLowerCase().includes(query.toLowerCase()) : device.category === activeCategory)
@@ -383,6 +407,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   const assignmentPassed = assignmentPoints?.all.passed || 0;
   const assignmentProgress = assignmentTotal > 0 && assignmentPassed === assignmentTotal ? 'complete' : assignmentPassed > 0 ? 'partial' : 'empty';
   const assignmentPercent = assignmentTotal ? Math.round((assignmentPassed / assignmentTotal) * 100) : 0;
+  const canFinishActivity = user?.role === 'student' && Boolean(activity) && assignmentTotal > 0 && assignmentPassed === assignmentTotal;
   const duplicateAlerts = useMemo(() => {
     const byAddress = new Map();
     for (const [deviceId, conflicts] of duplicateIpConflicts) {
@@ -396,6 +421,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   }, [duplicateIpConflicts, placed]);
 
   function persistEditorScroll(event) {
+    if (completionCameraAnimatingRef.current) return;
     const { scrollLeft, scrollTop } = event.currentTarget;
     if (viewSaveFrameRef.current) cancelAnimationFrame(viewSaveFrameRef.current);
     viewSaveFrameRef.current = requestAnimationFrame(() => {
@@ -410,6 +436,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   useEffect(() => localStorage.setItem('packettracker-notes', JSON.stringify(notes)), [notes]);
   useEffect(() => localStorage.setItem('packettracker-segments', JSON.stringify(segments)), [segments]);
   useEffect(() => {
+    if (completionCameraAnimatingRef.current) return;
     const previous = loadEditorView(project?.id);
     const canvas = canvasRef.current;
     localStorage.setItem(editorViewKey(project?.id), JSON.stringify({ ...previous, zoom, gridLock, sidebarOpen, activeCategory, inspectorPanel, activityHelpOpen, activityPanelTab, ...(canvas ? { scrollLeft: canvas.scrollLeft, scrollTop: canvas.scrollTop } : {}) }));
@@ -441,6 +468,14 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     const timer = setTimeout(() => setToast(''), 2200);
     return () => clearTimeout(timer);
   }, [toast]);
+  useEffect(() => {
+    if (!exportMenuOpen) return undefined;
+    const closeMenu = event => { if (!event.target.closest?.('.editor-export-menu')) setExportMenuOpen(false); };
+    const closeOnEscape = event => { if (event.key === 'Escape') setExportMenuOpen(false); };
+    document.addEventListener('pointerdown', closeMenu);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => { document.removeEventListener('pointerdown', closeMenu); document.removeEventListener('keydown', closeOnEscape); };
+  }, [exportMenuOpen]);
   useEffect(() => {
     const signature = duplicateAlerts.map(alert => `${alert.address}:${alert.names.join(',')}`).join('|');
     if (signature && signature !== conflictSignatureRef.current) setToast(`Duplicate IP detected: ${duplicateAlerts.map(alert => alert.address).join(', ')}`);
@@ -492,6 +527,10 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   }, [placed, connections, notes, segments]);
   useEffect(() => {
     function handleShortcut(event) {
+      if (completionTakeover) {
+        if (event.key === 'Escape') { event.preventDefault(); skipCompletionTakeover(); }
+        return;
+      }
       if (event.key === 'Escape') { event.preventDefault(); cancelActiveInteraction(); return; }
       const target = event.target;
       if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return;
@@ -507,7 +546,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     }
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
-  }, [placed, connections, notes, segments, selected, selectedIds, selectedArtifact, selectedConnection]);
+  }, [placed, connections, notes, segments, selected, selectedIds, selectedArtifact, selectedConnection, completionTakeover]);
 
   function createDesignSnapshot() {
     return { placed: serializeDesign(placed), connections: structuredClone(connections), notes: structuredClone(notes), segments: structuredClone(segments) };
@@ -529,6 +568,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     setSegmentDrawing(null);
     setContextMenu(null);
     setProfileOpen(false);
+    setExportMenuOpen(false);
     setServerPickerOpen(false);
     setServerPickerTarget(null);
     setPingDialog(null);
@@ -682,39 +722,42 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
 
   const snapCoordinate = value => gridLock ? Math.round(value / GRID_SIZE) * GRID_SIZE : value;
 
-  function autoZoomCanvas() {
+  function networkFitTarget(ignoreOcclusion = false) {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const content = [
-      ...placed.map(item => ({ left: item.x, top: item.y, right: item.x + 53, bottom: item.y + 58 })),
-      ...segments.map(segment => ({ left: segment.x, top: segment.y, right: segment.x + segment.width, bottom: segment.y + segment.height })),
-      ...notes.map(note => ({ left: note.x, top: note.y, right: note.x + 176, bottom: note.y + 108 }))
-    ];
-    if (!content.length) {
-      setZoom(100);
-      requestAnimationFrame(() => { canvas.scrollLeft = Math.max(0, CANVAS_ORIGIN_X - 80); canvas.scrollTop = Math.max(0, CANVAS_ORIGIN_Y - 80); });
-      return;
-    }
+    if (!canvas) return null;
+    const content = placed.map(item => ({ left: item.x, top: item.y, right: item.x + 53, bottom: item.y + 58 }));
+    if (!content.length) return { zoom: 100, scrollLeft: Math.max(0, CANVAS_ORIGIN_X - 80), scrollTop: Math.max(0, CANVAS_ORIGIN_Y - 80) };
     const bounds = content.reduce((result, item) => ({
       left: Math.min(result.left, item.left), top: Math.min(result.top, item.top),
       right: Math.max(result.right, item.right), bottom: Math.max(result.bottom, item.bottom)
     }), { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
-    const inspectorOpen = Boolean(selected || selectedConnection);
-    const rightOcclusion = (activity && activityHelpOpen ? activityPanelWidth : 0) + (inspectorOpen ? inspectorWidth + 24 : 0);
+    const inspectorOpen = !ignoreOcclusion && Boolean(selected || selectedConnection);
+    const rightOcclusion = ignoreOcclusion ? 0 : (activity && activityHelpOpen ? activityPanelWidth : 0) + (inspectorOpen ? inspectorWidth + 24 : 0);
     const viewportWidth = Math.max(240, canvas.clientWidth - rightOcclusion);
     const viewportHeight = Math.max(180, canvas.clientHeight);
-    const padding = 56;
     const contentWidth = Math.max(80, bounds.right - bounds.left);
     const contentHeight = Math.max(70, bounds.bottom - bounds.top);
-    const fitted = Math.floor(Math.min((viewportWidth - padding * 2) / contentWidth, (viewportHeight - padding * 2) / contentHeight) * 100);
-    const nextZoom = Math.max(MIN_ZOOM, Math.min(150, fitted));
+    const fitted = Math.floor(Math.min((viewportWidth * .8) / contentWidth, (viewportHeight * .8) / contentHeight) * 100);
+    const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fitted));
+    const scale = nextZoom / 100;
+    const centerX = (bounds.left + bounds.right) / 2;
+    const centerY = (bounds.top + bounds.bottom) / 2;
+    return {
+      zoom: nextZoom,
+      scrollLeft: Math.max(0, (CANVAS_ORIGIN_X + centerX) * scale - viewportWidth / 2),
+      scrollTop: Math.max(0, (CANVAS_ORIGIN_Y + centerY) * scale - viewportHeight / 2)
+    };
+  }
+
+  function autoZoomCanvas() {
+    const canvas = canvasRef.current;
+    const target = networkFitTarget();
+    if (!canvas || !target) return;
+    const nextZoom = target.zoom;
     setZoom(nextZoom);
     requestAnimationFrame(() => {
-      const scale = nextZoom / 100;
-      const centerX = (bounds.left + bounds.right) / 2;
-      const centerY = (bounds.top + bounds.bottom) / 2;
-      canvas.scrollLeft = Math.max(0, (CANVAS_ORIGIN_X + centerX) * scale - viewportWidth / 2);
-      canvas.scrollTop = Math.max(0, (CANVAS_ORIGIN_Y + centerY) * scale - viewportHeight / 2);
+      canvas.scrollLeft = target.scrollLeft;
+      canvas.scrollTop = target.scrollTop;
     });
   }
 
@@ -915,8 +958,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
       return (!inUse || isSharedWirelessRadio(port)) && enabled;
     });
     if (!availablePorts.length) return setToast(sourcePort ? 'No compatible enabled port is available on that device' : 'That device has no enabled free ports');
-    setSelected(deviceId);
-    setInspectorPanel('details');
+    setSelected(null);
+    setSelectedConnection(null);
     const requiresExplicitPort = availablePorts.length > 1;
     if (requiresExplicitPort) {
       setPortPicker({ deviceId, ports: compatiblePorts, startFresh, destination: Boolean(activePendingPort) });
@@ -939,6 +982,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     setConnectPointer(null);
     setAreaSelection(null);
     setSegmentDrawing(null);
+    if (tool === 'connect') { setSelected(null); setSelectedConnection(null); setSelectedArtifact(null); }
     if (tool !== 'area') setSelectedIds([]);
   }
 
@@ -956,7 +1000,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     event.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas || !event.deltaY) return;
-    const nextZoom = Math.max(MIN_ZOOM, Math.min(150, zoom + (event.deltaY < 0 ? 10 : -10)));
+    const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom + (event.deltaY < 0 ? 10 : -10)));
     if (nextZoom === zoom) return;
     const bounds = canvas.getBoundingClientRect();
     const uiScale = displayScale();
@@ -1107,10 +1151,119 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     setActivityBusy(true); setActivityResult(null);
     try {
       const result = await onActivityComplete({ version: 2, devices: serializeDesign(placed), connections, notes, segments });
-      setActivityResult(result);
-      if (result.evaluation?.completed) localStorage.removeItem(projectDraftKey(project.id));
+      if (result.evaluation?.completed) {
+        localStorage.removeItem(projectDraftKey(project.id));
+        beginCompletionTakeover(result);
+      } else setActivityResult(result);
     } catch (error) { setToast(error.message || 'Could not check the activity'); }
     finally { setActivityBusy(false); }
+  }
+
+  function closeDesignerSurfaces() {
+    setSelected(null); setSelectedIds([]); setSelectedArtifact(null); setSelectedConnection(null);
+    setActivityHelpOpen(false); setAssignmentPanelOpen(false); setCliDeviceId(null);
+    setContextMenu(null); setPingDialog(null); setBroadcast(null);
+    setServerPickerOpen(false); setServerPickerTarget(null); setPortPicker(null);
+    setProfileOpen(false); setExportMenuOpen(false);
+    setActiveTool('select'); setPendingPort(null); setConnectPointer(null);
+    setAreaSelection(null); setSegmentDrawing(null); setIsPanning(false);
+  }
+
+  function revealCompletionResult(result) {
+    clearTimeout(completionTimerRef.current);
+    cancelAnimationFrame(completionCameraFrameRef.current);
+    completionTimerRef.current = null;
+    completionCameraFrameRef.current = null;
+    completionCameraAnimatingRef.current = false;
+    setCompletionTakeover(null);
+    setActivityResult(result);
+  }
+
+  function animateCompletionFit(result) {
+    const canvas = canvasRef.current;
+    const target = networkFitTarget(true);
+    if (!canvas || !target) return revealCompletionResult(result);
+    const start = { zoom, left: canvas.scrollLeft, top: canvas.scrollTop };
+    const startedAt = performance.now();
+    const duration = 2000;
+    completionCameraAnimatingRef.current = true;
+    const frame = now => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 5);
+      const nextZoom = start.zoom + (target.zoom - start.zoom) * eased;
+      flushSync(() => setZoom(nextZoom));
+      canvas.scrollLeft = start.left + (target.scrollLeft - start.left) * eased;
+      canvas.scrollTop = start.top + (target.scrollTop - start.top) * eased;
+      if (progress < 1) completionCameraFrameRef.current = requestAnimationFrame(frame);
+      else {
+        completionCameraAnimatingRef.current = false;
+        setZoom(target.zoom);
+        canvas.scrollLeft = target.scrollLeft;
+        canvas.scrollTop = target.scrollTop;
+        setCompletionTakeover({ phase: 'electrify', result });
+        completionTimerRef.current = setTimeout(() => {
+          setCompletionTakeover({ phase: 'burst', result });
+          completionTimerRef.current = setTimeout(() => revealCompletionResult(result), 1400);
+        }, 3000);
+      }
+    };
+    completionCameraFrameRef.current = requestAnimationFrame(frame);
+  }
+
+  function beginCompletionTakeover(result) {
+    const completionId = result.attempt?.id || `${activity?.activityId || project?.id}:${result.attempt?.awardedLevel || activity?.attempt?.requestedLevel}`;
+    if (celebratedAttemptsRef.current.has(completionId)) return setActivityResult(result);
+    celebratedAttemptsRef.current.add(completionId);
+    completionSurfaceSnapshotRef.current = {
+      sidebarOpen, selected, selectedIds: [...selectedIds], selectedArtifact, selectedConnection,
+      activityHelpOpen, assignmentPanelOpen, cliDeviceId
+    };
+    closeDesignerSurfaces();
+    setSidebarOpen(false);
+    setActivityResult(null);
+    setCompletionTakeover({ phase: 'recognition', result });
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    completionTimerRef.current = setTimeout(() => {
+      if (reducedMotion) {
+        const canvas = canvasRef.current;
+        const target = networkFitTarget(true);
+        if (canvas && target) { setZoom(target.zoom); canvas.scrollLeft = target.scrollLeft; canvas.scrollTop = target.scrollTop; }
+        revealCompletionResult(result);
+        return;
+      }
+      setCompletionTakeover({ phase: 'takeover', result });
+      animateCompletionFit(result);
+    }, reducedMotion ? 350 : 1000);
+  }
+
+  function skipCompletionTakeover() {
+    if (completionTakeover?.result) revealCompletionResult(completionTakeover.result);
+  }
+
+  function continueWorkingAfterCompletion() {
+    const snapshot = completionSurfaceSnapshotRef.current;
+    completionSurfaceSnapshotRef.current = null;
+    setActivityResult(null);
+    if (!snapshot) return;
+    setSidebarOpen(snapshot.sidebarOpen);
+    setSelected(snapshot.selected); setSelectedIds(snapshot.selectedIds);
+    setSelectedArtifact(snapshot.selectedArtifact); setSelectedConnection(snapshot.selectedConnection);
+    setActivityHelpOpen(snapshot.activityHelpOpen); setAssignmentPanelOpen(snapshot.assignmentPanelOpen);
+    setCliDeviceId(snapshot.cliDeviceId);
+  }
+
+  function returnToSkillsAfterCompletion() {
+    completionSurfaceSnapshotRef.current = null;
+    onBack();
+  }
+
+  function showBroadcast(sourceId) {
+    const recipientIds = broadcastRecipients(placed, connections, sourceId);
+    clearTimeout(broadcastTimerRef.current);
+    setBroadcast({ sourceId, recipientIds: new Set(recipientIds) });
+    setContextMenu(null);
+    setToast(recipientIds.length ? `${recipientIds.length} device${recipientIds.length === 1 ? '' : 's'} received the broadcast` : 'No other devices are on this broadcast domain');
+    broadcastTimerRef.current = setTimeout(() => setBroadcast(null), 3500);
   }
 
   async function saveActivityProgress() {
@@ -1129,27 +1282,40 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     catch (error) { setToast(error.message || 'Could not reset the activity'); setActivityBusy(false); }
   }
 
+  function designJsonText() {
+    return `${JSON.stringify({ version: 2, name: project?.name || 'Untitled Network', devices: serializeDesign(placed), connections, notes, segments }, null, 2)}\n`;
+  }
+
+  async function copyDesignJson() {
+    try {
+      await navigator.clipboard.writeText(designJsonText());
+      setExportMenuOpen(false);
+      setToast('Network JSON copied to clipboard');
+    } catch { setToast('Could not copy the network JSON'); }
+  }
+
   function exportDesign() {
-    const blob = new Blob([JSON.stringify({ version: 2, name: 'Untitled Network', devices: serializeDesign(placed), connections, notes, segments }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([designJsonText()], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = 'untitled-network.packettracker.json';
     link.click();
     URL.revokeObjectURL(link.href);
+    setExportMenuOpen(false);
     setToast('Design exported');
   }
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${completionTakeover ? 'completion-cinematic-active' : ''}`}>
     <header className="topbar">
       <div className="brand editor-brand"><img className="editor-brand-logo" src="/packettracker-logo-with-text.png" alt="PacketTracker"/></div>
       <div className="project-header-nav"><span className="file-name">{project?.name || 'Untitled Network'}</span><button className="back-to-projects" onClick={onBack}>{activity ? 'Back to skills' : 'Back to projects'}</button></div>
       <div className="top-actions">
-        {activity && <><span className={`activity-save-state ${activitySaveState}`}>{activitySaveState === 'saving' ? 'Saving…' : activitySaveState === 'error' ? 'Save failed' : 'Progress saved'}</span><button className="button secondary" disabled={activityBusy} onClick={resetActivity}><RotateCcw size={16}/> Reset activity</button><button className={`button secondary ${activityHelpOpen ? 'active' : ''}`} onClick={() => setActivityHelpOpen(true)}><CircleHelp size={16}/> Info</button><button className="button primary" disabled={activitySaveState === 'saving'} onClick={saveActivityProgress}><Save size={16}/>{activitySaveState === 'saving' ? 'Saving…' : 'Save'}</button></>}
+        {activity && <><span className={`activity-save-state ${activitySaveState}`}>{activitySaveState === 'saving' ? 'Saving…' : activitySaveState === 'error' ? 'Save failed' : 'Progress saved'}</span><button className="button secondary" disabled={activityBusy} onClick={resetActivity}><RotateCcw size={16}/> Reset activity</button><button className={`button secondary ${activityHelpOpen ? 'active' : ''}`} onClick={() => setActivityHelpOpen(true)}><CircleHelp size={16}/> Info</button>{canFinishActivity ? <button className="button primary activity-complete-button" disabled={activityBusy || activitySaveState === 'saving'} onClick={completeActivity}><ShieldCheck size={16}/>{activityBusy ? 'Finishing…' : 'Finish'}</button> : <button className="button primary" disabled={activitySaveState === 'saving'} onClick={saveActivityProgress}><Save size={16}/>{activitySaveState === 'saving' ? 'Saving…' : 'Save'}</button>}</>}
         {assignmentSpec && (activity ? <div className={`assignment-summary-button assignment-summary-indicator ${assignmentProgress}`} style={{ '--challenge-progress': `${assignmentPercent}%` }} aria-label={`Challenge progress: ${assignmentPassed} of ${assignmentTotal} complete`}><FilePlus2 size={17}/><span>Challenge progress</span><small>{assignmentPassed} of {assignmentTotal} complete</small></div> : <button className={`assignment-summary-button ${assignmentProgress}`} disabled={activityBusy} style={{ '--challenge-progress': `${assignmentPercent}%` }} onClick={() => setAssignmentPanelOpen(true)}><FilePlus2 size={17}/><span>Show challenge</span><small>{assignmentPassed} of {assignmentTotal} complete</small></button>)}
         <button className="icon-button" title="Undo (Ctrl+Z)" disabled={!historyRef.current.past.length && !pendingHistoryRef.current} onClick={undoDesign}><Undo2 size={17}/></button>
         <button className="icon-button" title="Redo (Ctrl+Y)" disabled={!historyRef.current.future.length} onClick={redoDesign}><Redo2 size={17}/></button>
         <div className="divider" />
-        <button className="button secondary" onClick={exportDesign}><Download size={16}/> Export</button>
+        <div className="editor-export-menu"><button className="button secondary" aria-haspopup="menu" aria-expanded={exportMenuOpen} onClick={() => setExportMenuOpen(value => !value)}><Download size={16}/> Export <ChevronDown size={13}/></button>{exportMenuOpen && <div role="menu"><button role="menuitem" onClick={copyDesignJson}><Copy size={15}/><span><strong>Copy to clipboard</strong><small>Copy the network JSON</small></span></button><button role="menuitem" onClick={exportDesign}><Download size={15}/><span><strong>Download JSON</strong><small>Save a .packettracker.json file</small></span></button></div>}</div>
         {!activity && <button className="button primary" disabled={readOnly} title={readOnly ? 'Shared projects are read-only' : 'Save project'} onClick={saveDesign}><Save size={16}/> {readOnly ? 'Read only' : 'Save project'}</button>}
         <div className="profile-wrap">
           <button className="avatar" onClick={() => setProfileOpen(value => !value)} aria-expanded={profileOpen} aria-label="Open profile settings">{user?.name?.split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase() || 'PT'}</button>
@@ -1174,39 +1340,32 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
             </button>)}
           </nav>
           <section className="device-panel">
-            <div className="panel-title"><div><strong>{query ? 'Search results' : categories.find(c => c.id === activeCategory)?.label}</strong><span>{filtered.length} devices</span></div><button className="icon-button"><Ellipsis size={17}/></button></div>
             <div className="device-grid">
-              {filtered.map(device => device.id === 'server' ? <div key={device.id} className="device-card server-device-card">
-                <div className="server-card-overview">
-                  <div className="device-icon" style={{ '--device-color': device.color }}><device.icon size={25}/></div>
-                  <div className="device-summary"><span>{device.name}</span><p>Choose the service this host provides.</p><small>1 Ethernet interface</small></div>
-                </div>
-                <div className="server-type-palette">
-                  <strong>Drag and Drop server type</strong>
-                  <div>{serverRoles.map(role => <button key={role.id} draggable aria-label={`Add ${role.name}`} title={role.purpose} onDragStart={event => { event.stopPropagation(); handleDeviceDragStart(event, configuredServerForRole(role)); }} onClick={() => addDevice(configuredServerForRole(role))}>
-                    <role.icon size={15}/><span>{role.name.replace(' Server', '')}</span>
-                  </button>)}</div>
-                </div>
-              </div> : <button key={device.id} className="device-card" aria-label={`Add ${device.name}`} draggable onDragStart={event => handleDeviceDragStart(event, device)} onClick={() => chooseDevice(device)}>
+              {filtered.filter(device => device.id !== 'server').map(device => <div key={device.id} className="device-card" role="button" tabIndex="0" aria-label={`Add ${device.name}`} draggable onDragStart={event => handleDeviceDragStart(event, device)} onClick={() => chooseDevice(device)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); chooseDevice(device); } }}>
+                <button type="button" className="device-help" aria-label={`About ${device.name}`} onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}><CircleHelp size={14}/><span className="device-tooltip" role="tooltip"><strong>{device.name}</strong><p>{device.purpose || 'A general-purpose network device used to build and test network topologies.'}</p><span className="device-tooltip-details">{device.model && <span><b>Model</b><small>{device.model}</small></span>}<span><b>Interfaces</b><small>{device.ports || 'Standard network connectivity'}</small></span></span>{!!device.capabilities?.length && <span className="tooltip-features"><b>Supported features</b><span className="tooltip-capabilities">{featureLabels(device.capabilities).map(feature => <i key={feature}>{feature}</i>)}</span></span>}</span></button>
                 <div className="device-icon" style={{ '--device-color': device.color }}><device.icon size={25}/></div>
-                <div className="device-summary">
-                  <span>{device.name}</span>
-                  <p>{device.purpose || device.model || 'A general-purpose network device.'}</p>
-                  <small>{device.ports || 'Port details coming soon'}</small>
-                  {!!device.capabilities?.length && <div className="capability-list">{featureLabels(device.capabilities).map(feature => <span key={feature}>{feature}</span>)}</div>}
-                </div>
-              </button>)}
+                <span className="device-name">{device.name}</span>
+              </div>)}
+              {filtered.some(device => device.id === 'server') && <section className="server-device-group" aria-labelledby="server-device-heading">
+                <h3 id="server-device-heading">Servers</h3>
+                <div className="server-role-grid-library">{serverRoles.map(role => { const configured = configuredServerForRole(role); return <div key={role.id} className="device-card server-role-card" role="button" tabIndex="0" draggable aria-label={`Add ${role.name}`} onDragStart={event => handleDeviceDragStart(event, configured)} onClick={() => addDevice(configured)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); addDevice(configured); } }}>
+                  <button type="button" className="device-help" aria-label={`About ${role.name}`} onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}><CircleHelp size={14}/><span className="device-tooltip" role="tooltip"><strong>{role.name}</strong><p>{role.purpose}</p><span className="device-tooltip-details"><span><b>Device type</b><small>Configurable server</small></span><span><b>Interfaces</b><small>1 Ethernet interface</small></span></span>{!!role.capabilities?.length && <span className="tooltip-features"><b>Supported features</b><span className="tooltip-capabilities">{featureLabels(role.capabilities).map(feature => <i key={feature}>{feature}</i>)}</span></span>}</span></button>
+                  <span className="device-icon" style={{ '--device-color': configured.color }}><role.icon size={29}/></span>
+                  <span className="device-name">{role.name}</span>
+                </div>; })}</div>
+              </section>}
             </div>
             <div className="drag-hint"><MousePointer2 size={15}/> Drag a device to the workspace, or click to add</div>
           </section>
         </div>
       </aside>
 
-      {!sidebarOpen && <button className="sidebar-opener" onClick={() => setSidebarOpen(true)}><PanelLeftOpen size={18}/></button>}
+      {!sidebarOpen && !completionTakeover && !activityResult?.evaluation?.completed && <button className="sidebar-opener" onClick={() => setSidebarOpen(true)}><PanelLeftOpen size={18}/></button>}
 
       <section className="canvas-wrap">
         {activity && activityHelpOpen && <ActivityInstructionsPanel activity={activity} tab={activityPanelTab} onTabChange={setActivityPanelTab} width={activityPanelWidth} onWidthChange={setActivityPanelWidth} specification={assignmentSpec} evaluation={assignmentEvaluation} points={assignmentPoints} onUseHint={async hintId => { await onActivitySave?.({ version: 2, devices: serializeDesign(placed), connections, notes, segments }, { hintIds: [hintId] }); }} onClose={() => setActivityHelpOpen(false)}/>}
-        {activityResult && <ActivityResultModal result={activityResult} level={activity.attempt.requestedLevel} onClose={() => setActivityResult(null)} onBack={onBack}/>}
+        {completionTakeover && <CompletionTakeover phase={completionTakeover.phase} onSkip={skipCompletionTakeover} title={project?.name || activity?.definition?.title} proficiency={completionTakeover.result.attempt?.awardedLevel || activity?.attempt?.requestedLevel}/>}
+        {activityResult && <ActivityResultModal result={activityResult} level={activity.attempt.requestedLevel} onClose={() => setActivityResult(null)} onContinue={continueWorkingAfterCompletion} onBack={returnToSkillsAfterCompletion}/>}
         {assignmentSpec && assignmentPanelOpen && <AssignmentChallengeModal spec={assignmentSpec} evaluation={assignmentEvaluation} devices={placed} activeCategory={assignmentPanelCategory} onCategoryChange={setAssignmentPanelCategory} onClose={() => setAssignmentPanelOpen(false)}/>}
         <div className="canvas-toolbar">
           <button className={`tool ${activeTool === 'select' ? 'active' : ''}`} onClick={() => setTool('select')}><MousePointer2 size={17}/><span>Select</span></button>
@@ -1218,8 +1377,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
           <button className={`tool ${gridLock ? 'active' : ''}`} title="Snap newly placed and moved items to the background grid" aria-pressed={gridLock} onClick={() => setGridLock(value => !value)}><Grid3X3 size={17}/><span>Grid lock</span></button>
           <div className="divider" />
           <button className="tool zoom-tool" title="Zoom out" aria-label="Zoom out" disabled={zoom <= MIN_ZOOM} onClick={() => setZoom(value => Math.max(MIN_ZOOM, value - 10))}><ZoomOut size={17}/></button>
-          <span className="toolbar-zoom-value" aria-label={`Current zoom ${zoom}%`}>{zoom}%</span>
-          <button className="tool zoom-tool" title="Zoom in" aria-label="Zoom in" disabled={zoom >= 150} onClick={() => setZoom(value => Math.min(150, value + 10))}><ZoomIn size={17}/></button>
+          <span className="toolbar-zoom-value" aria-label={`Current zoom ${Math.round(zoom)}%`}>{Math.round(zoom)}%</span>
+          <button className="tool zoom-tool" title="Zoom in" aria-label="Zoom in" disabled={zoom >= MAX_ZOOM} onClick={() => setZoom(value => Math.min(MAX_ZOOM, value + 10))}><ZoomIn size={17}/></button>
           <button className="tool auto-zoom-tool" title="Fit the network design in the visible workspace" onClick={autoZoomCanvas}><Scan size={17}/><span>Auto zoom</span></button>
         </div>
         {!!duplicateAlerts.length && <div className="topology-alert" role="alert"><TriangleAlert size={17}/><div><strong>Duplicate IP address detected</strong><span>{duplicateAlerts.map(alert => `${alert.address} — ${alert.names.join(' and ')}`).join(' · ')}</span></div></div>}
@@ -1277,6 +1436,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
                 return source ? <line className="connection-preview" x1={source.x + 27} y1={source.y + 23} x2={connectPointer.x} y2={connectPointer.y}/> : null;
               })()}
             </svg>
+            {completionTakeover?.phase === 'electrify' && <NetworkElectricCelebration devices={placed} connections={connections} proficiency={completionTakeover.result.attempt?.awardedLevel || activity?.attempt?.requestedLevel}/>}
             {areaSelection && <div className="selection-box" style={{
               left: Math.min(areaSelection.startX, areaSelection.x),
               top: Math.min(areaSelection.startY, areaSelection.y),
@@ -1290,20 +1450,20 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
               <button className="button primary" onClick={() => addDevice(devices[0])}><Plus size={16}/> Add a router</button>
             </div>}
             {notes.map(note => <CanvasNote key={note.id} note={note} selected={selectedArtifact?.type === 'note' && selectedArtifact.id === note.id} onSelect={() => { setSelectedArtifact({ type: 'note', id: note.id }); setSelected(null); setSelectedIds([]); setSelectedConnection(null); }} onChange={text => setNotes(current => current.map(item => item.id === note.id ? { ...item, text } : item))} onDelete={() => { setNotes(current => current.filter(item => item.id !== note.id)); setSelectedArtifact(null); }}/>) }
-            {placed.map(item => <PlacedDevice key={item.instanceId} item={item} ipConflicts={duplicateIpConflicts.get(item.instanceId) || []} selected={selected === item.instanceId || selectedIds.includes(item.instanceId)} pingSource={pingDialog && !pingDialog.targetId && pingDialog.sourceId === item.instanceId} interactionMode={pingDialog && !pingDialog.targetId ? 'ping' : connectionActive ? 'connect' : activeTool} zoom={zoom} cancelToken={cancelToken} onPingTarget={instanceId => {
+            {placed.map(item => <PlacedDevice key={item.instanceId} item={item} ipConflicts={duplicateIpConflicts.get(item.instanceId) || []} selected={selected === item.instanceId || selectedIds.includes(item.instanceId)} pingSource={pingDialog && !pingDialog.targetId && pingDialog.sourceId === item.instanceId} broadcastSource={broadcast?.sourceId === item.instanceId} broadcastRecipient={broadcast?.recipientIds.has(item.instanceId)} interactionMode={pingDialog && !pingDialog.targetId ? 'ping' : connectionActive ? 'connect' : activeTool} zoom={zoom} cancelToken={cancelToken} onPingTarget={instanceId => {
               if (instanceId === pingDialog.sourceId) return setToast('Choose a different device to ping');
               setPingDialog(current => ({ ...current, targetId: instanceId }));
             }} onConnect={connectDevice} onContextMenu={event => {
               event.preventDefault(); event.stopPropagation();
-              setSelected(item.instanceId); setSelectedIds([]); setSelectedArtifact(null); setSelectedConnection(null);
-              setContextMenu({ x: event.clientX, y: event.clientY, deviceId: item.instanceId, managed: ['switch-managed', 'firewall-stateless', 'firewall-stateful', 'firewall-ngfw', 'router-advanced'].includes(item.id), server: item.id === 'server', serverRole: item.serverRole || 'generic' });
+              setSelected(null); setSelectedIds([]); setSelectedArtifact(null); setSelectedConnection(null);
+              setContextMenu({ x: event.clientX, y: event.clientY, deviceId: item.instanceId, broadcastCapable: getDeviceDefinition(item.id)?.ports.some(port => ['endpoint', 'endpoint-wireless'].includes(port.kind)), managed: ['switch-managed', 'firewall-stateless', 'firewall-stateful', 'firewall-ngfw', 'router-advanced'].includes(item.id), server: item.id === 'server', serverRole: item.serverRole || 'generic' });
             }} onSelect={instanceId => { setSelected(instanceId); if (!selectedIds.includes(instanceId)) setSelectedIds([]); setSelectedArtifact(null); setSelectedConnection(null); setInspectorPanel('details'); }} onMove={moveDevice} onDelete={() => { setPlaced(current => current.filter(d => d.instanceId !== item.instanceId)); setConnections(current => current.filter(connection => connection.a.deviceId !== item.instanceId && connection.b.deviceId !== item.instanceId)); setSelected(null); setSelectedConnection(null); }} />)}
           </div>
           </div>
         </div>
         <div className="statusbar">
           <div><span className="status-dot"/> Logical workspace <span className="separator">•</span> {placed.length} {placed.length === 1 ? 'device' : 'devices'}{selectedIds.length > 0 && ` · ${selectedIds.length} selected`}</div>
-          <div className="zoom-control"><button onClick={() => setZoom(z => Math.max(MIN_ZOOM, z - 10))}><ZoomOut size={16}/></button><input type="range" min={MIN_ZOOM} max="150" value={zoom} onChange={e => setZoom(Number(e.target.value))}/><span>{zoom}%</span><button onClick={() => setZoom(z => Math.min(150, z + 10))}><ZoomIn size={16}/></button><button onClick={() => setZoom(100)}><RotateCcw size={14}/></button></div>
+          <div className="zoom-control"><button onClick={() => setZoom(z => Math.max(MIN_ZOOM, z - 10))}><ZoomOut size={16}/></button><input type="range" min={MIN_ZOOM} max={MAX_ZOOM} value={zoom} onChange={e => setZoom(Number(e.target.value))}/><span>{Math.round(zoom)}%</span><button onClick={() => setZoom(z => Math.min(MAX_ZOOM, z + 10))}><ZoomIn size={16}/></button><button onClick={() => setZoom(100)}><RotateCcw size={14}/></button></div>
         </div>
         {selected && <DeviceInspector
           item={placed.find(item => item.instanceId === selected)}
@@ -1341,7 +1501,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     })()}
     {contextMenu && contextMenu.type !== 'connection' && <div className="device-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={event => event.stopPropagation()}>
       <button onClick={() => { const sourceId = contextMenu.deviceId; setPingDialog({ sourceId, targetId: null }); setSelected(null); setSelectedIds([]); setSelectedArtifact(null); setSelectedConnection(null); setContextMenu(null); }}><Send size={15}/><span><strong>Ping</strong><small>Test reachability to another device</small></span></button>
-      <button onClick={() => { const deviceId = contextMenu.deviceId; setActiveTool('select'); setPendingPort(null); setPortPicker(null); setConnectPointer(null); setAreaSelection(null); setSegmentDrawing(null); setSelectedIds([]); setSelected(deviceId); setContextMenu(null); connectDevice(deviceId, true); }}><Cable size={15}/><span><strong>Connect</strong><small>Start a temporary link interaction</small></span></button>
+      {contextMenu.broadcastCapable && <button onClick={() => showBroadcast(contextMenu.deviceId)}><RadioTower size={15}/><span><strong>Broadcast</strong><small>Show every device on this Layer 2 domain</small></span></button>}
+      <button onClick={() => { const deviceId = contextMenu.deviceId; setActiveTool('select'); setPendingPort(null); setPortPicker(null); setConnectPointer(null); setAreaSelection(null); setSegmentDrawing(null); setSelectedIds([]); setSelected(null); setSelectedConnection(null); setContextMenu(null); connectDevice(deviceId, true); }}><Cable size={15}/><span><strong>Connect</strong><small>Start a temporary link interaction</small></span></button>
       {contextMenu.managed && <button onClick={() => { setCliDeviceId(contextMenu.deviceId); setSelected(null); setContextMenu(null); }}><EthernetPort size={15}/><span><strong>Manage</strong><small>Open device command line</small></span></button>}
       {contextMenu.server && <button onClick={() => { setServerRoleDraft(contextMenu.serverRole); setServerPickerTarget(contextMenu.deviceId); setServerPickerOpen(true); setContextMenu(null); }}><Server size={15}/><span><strong>Change server role</strong><small>Choose DNS, DHCP, web, email, or file</small></span></button>}
       {assignmentSpec && (() => {
@@ -1353,7 +1514,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
       })()}
     </div>}
     {pingDialog?.targetId && <PingDialog sourceId={pingDialog.sourceId} targetId={pingDialog.targetId} devices={placed} connections={connections} onClose={() => setPingDialog(null)}/>}
-    {cliDeviceId && <CliDialog item={placed.find(item => item.instanceId === cliDeviceId)} sidePanelOpen={activityHelpOpen} sidePanelWidth={activityPanelWidth} onSwitchingChange={updateSwitching} onNgfwChange={updateNgfw} onFirewallChange={updateFirewall} onRouterChange={updateRouter} onDone={() => setCliDeviceId(null)}/>}
+    {cliDeviceId && <CliDialog item={placed.find(item => item.instanceId === cliDeviceId)} showHelp={!activity || activity.attempt?.requestedLevel === 'guided'} sidePanelOpen={activityHelpOpen} sidePanelWidth={activityPanelWidth} onSwitchingChange={updateSwitching} onNgfwChange={updateNgfw} onFirewallChange={updateFirewall} onRouterChange={updateRouter} onDone={() => setCliDeviceId(null)}/>}
     {serverPickerOpen && <div className="modal-backdrop" onPointerDown={() => setServerPickerOpen(false)}>
       <section className="server-picker" role="dialog" aria-modal="true" aria-labelledby="server-picker-title" onPointerDown={event => event.stopPropagation()}>
         <div className="server-picker-header"><div><span>Configure device</span><h2 id="server-picker-title">Choose a server role</h2><p>Select the primary service this server will provide.</p></div><button className="icon-button" onClick={() => setServerPickerOpen(false)}><X size={17}/></button></div>
@@ -1521,15 +1682,15 @@ function PingDialog({ sourceId, targetId, devices, connections, onClose }) {
   </div>;
 }
 
-function CliDialog({ item, sidePanelOpen = false, sidePanelWidth = 390, onSwitchingChange, onNgfwChange, onFirewallChange, onRouterChange, onDone }) {
+function CliDialog({ item, showHelp = true, sidePanelOpen = false, sidePanelWidth = 390, onSwitchingChange, onNgfwChange, onFirewallChange, onRouterChange, onDone }) {
   if (!item) return null;
   return <div className={`modal-backdrop cli-backdrop ${sidePanelOpen ? 'with-instructions' : ''}`} style={{ '--activity-panel-width': `${sidePanelWidth}px` }}>
     <section className="cli-dialog" role="dialog" aria-modal="true" aria-labelledby="cli-dialog-title" onPointerDown={event => event.stopPropagation()}>
       <div className="cli-dialog-header"><div><span>Device command line</span><h2 id="cli-dialog-title">{item.customName || item.name}</h2></div><p>Finish with <code>end</code>, or use <code>exit</code> from the top-level prompt.</p></div>
-      {item.id === 'switch-managed' && <ManagedSwitchTerminal item={item} onSwitchingChange={onSwitchingChange} onDone={onDone}/>}
-      {item.id === 'firewall-ngfw' && <NgfwTerminal item={item} onNgfwChange={onNgfwChange} onFirewallChange={onFirewallChange} onDone={onDone}/>}
-      {['firewall-stateless', 'firewall-stateful'].includes(item.id) && <FirewallPolicyTerminal item={item} onFirewallChange={onFirewallChange} onDone={onDone}/>}
-      {item.id === 'router-advanced' && <RouterTerminal item={item} onRouterChange={onRouterChange} onDone={onDone}/>}
+      {item.id === 'switch-managed' && <ManagedSwitchTerminal item={item} showHelp={showHelp} onSwitchingChange={onSwitchingChange} onDone={onDone}/>}
+      {item.id === 'firewall-ngfw' && <NgfwTerminal item={item} showHelp={showHelp} onNgfwChange={onNgfwChange} onFirewallChange={onFirewallChange} onDone={onDone}/>}
+      {['firewall-stateless', 'firewall-stateful'].includes(item.id) && <FirewallPolicyTerminal item={item} showHelp={showHelp} onFirewallChange={onFirewallChange} onDone={onDone}/>}
+      {item.id === 'router-advanced' && <RouterTerminal item={item} showHelp={showHelp} onRouterChange={onRouterChange} onDone={onDone}/>}
     </section>
   </div>;
 }
@@ -1594,6 +1755,16 @@ function describePort(port) {
 
 const connectionStatusLabels = { operational: 'Operational', partial: 'Partial', misconfigured: 'Misconfigured', down: 'Down', unevaluated: 'Not evaluated' };
 
+function InspectorSection({ title, badge, defaultOpen = false, className = '', children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return <section className={`inspector-section inspector-collapsible ${open ? 'open' : ''} ${className}`}>
+    <button type="button" className="inspector-section-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+      <h3>{title}</h3>{badge != null && <span>{badge}</span>}<ChevronDown size={15}/>
+    </button>
+    {open && <div className="inspector-section-content">{children}</div>}
+  </section>;
+}
+
 function ConnectionInspector({ connection, validation, width, onWidthChange, onClose, cancelToken }) {
   const resize = useRef(null);
   useEffect(() => {
@@ -1647,6 +1818,8 @@ function DeviceInspector({ item, onClose, onInterfaceChange, onGatewayChange, co
   const definition = getDeviceDefinition(item.id);
   const ports = definition?.ports || [];
   const bridgeIds = [...new Set(ports.map(port => port.bridge).filter(Boolean))];
+  const networkInterfaces = [...ports.filter(port => ['routed', 'endpoint', 'endpoint-wireless'].includes(port.kind)).map(port => ({ id: port.id, label: port.label })), ...bridgeIds.map(id => ({ id, label: `${id.toUpperCase()} bridge` }))];
+  const linkedPortCount = ports.filter(port => connections.some(connection => [connection.a, connection.b].some(end => end.deviceId === item.instanceId && end.portId === port.id))).length;
 
   function startResize(event) {
     event.preventDefault(); event.stopPropagation();
@@ -1666,6 +1839,17 @@ function DeviceInspector({ item, onClose, onInterfaceChange, onGatewayChange, co
     setEditingName(false);
   }
 
+  function peerInterfaceAddresses(peer, peerPort) {
+    if (!peer || !peerPort) return [];
+    const interfaceIds = new Set([peerPort.id, peerPort.bridge].filter(Boolean));
+    const addresses = Object.entries(peer.interfaces || {}).filter(([interfaceId, config]) => interfaceIds.has(interfaceId) && config?.address).map(([, config]) => `${config.address}/${config.prefix ?? 24}`);
+    for (const [interfaceId, subinterface] of Object.entries({ ...(peer.ngfw?.subinterfaces || {}), ...(peer.routerConfig?.subinterfaces || {}) })) {
+      const config = peer.interfaces?.[interfaceId];
+      if (subinterface.parent === peerPort.id && config?.address) addresses.push(`${config.address}/${config.prefix ?? 24}`);
+    }
+    return [...new Set(addresses)];
+  }
+
   return <aside className="inspector" style={{ width }} onPointerDown={event => event.stopPropagation()}>
     <div className="inspector-resize-handle" role="separator" aria-label="Resize device inspector" aria-orientation="vertical" tabIndex="0" onKeyDown={event => { if (event.key === 'ArrowLeft') onWidthChange(Math.min(640, width + 20)); else if (event.key === 'ArrowRight') onWidthChange(Math.max(260, width - 20)); }} onPointerDown={startResize} onPointerMove={continueResize} onPointerUp={() => { resize.current = null; }}/>
     <div className="inspector-scroll">
@@ -1675,8 +1859,7 @@ function DeviceInspector({ item, onClose, onInterfaceChange, onGatewayChange, co
     </div>
     {!!ipConflicts.length && <div className="device-ip-conflict"><CircleHelp size={14}/><span><strong>Duplicate IP address detected</strong><small>{[...new Set(ipConflicts.map(conflict => conflict.address))].join(', ')} is already used by another device on this local network. Assign a unique address.</small></span></div>}
     {!definition ? <div className="inspector-empty">Detailed simulation is not available for this device yet.</div> : <>
-      <section className="inspector-section">
-        <h3>Physical ports <span>{ports.length}</span></h3>
+      <InspectorSection key={`${item.instanceId}-ports`} title="Physical ports" badge={`${linkedPortCount}/${ports.length} linked`} defaultOpen={item.id !== 'switch-managed'}>
         <div className="port-list">{ports.map(port => {
           const isPending = pendingPort?.deviceId === item.instanceId && pendingPort?.portId === port.id;
           const link = connections.find(connection => [connection.a, connection.b].some(end => end.deviceId === item.instanceId && end.portId === port.id));
@@ -1684,26 +1867,28 @@ function DeviceInspector({ item, onClose, onInterfaceChange, onGatewayChange, co
           const peerEnd = link && (link.a.deviceId === item.instanceId && link.a.portId === port.id ? link.b : link.a);
           const peer = peerEnd && allDevices.find(device => device.instanceId === peerEnd.deviceId);
           const peerPort = peerEnd && getDeviceDefinition(peer?.id)?.ports.find(candidate => candidate.id === peerEnd.portId);
-          const linkedTo = peer ? `Linked to ${peer.customName || peer.name}${peerPort ? ` · ${peerPort.label}` : ''}` : 'Linked';
+          const peerAddresses = peerInterfaceAddresses(peer, peerPort);
+          const peerDetails = peer && <div className="port-peer-details"><span>Connected device</span><strong>{peer.customName || peer.name}</strong><small>{[peerPort?.label, peerAddresses.length ? `${peerAddresses.length === 1 ? 'IP' : 'IPs'} ${peerAddresses.join(', ')}` : null].filter(Boolean).join(' · ') || 'Physical connection'}</small></div>;
           const switchPort = item.switching?.ports?.[port.id];
           const vlanName = switchPort ? item.switching.vlans?.[switchPort.accessVlan] : null;
           if (switchPort) return <div className={`managed-port-row ${isPending ? 'pending' : ''}`} key={port.id}>
-            <div className="managed-port-identity"><div className={`port-symbol ${port.kind}`}><EthernetPort size={14}/></div><div><strong>{port.label}</strong><span>{switchPort.enabled ? (switchPort.description || 'Enabled access port') : 'Shutdown'}</span></div></div>
+            <div className="managed-port-identity"><div className={`port-symbol ${port.kind}`}><EthernetPort size={14}/></div><div><strong>{port.label}</strong><span>{isConnected ? 'Physical link active' : switchPort.enabled ? (switchPort.description || 'Enabled access port') : 'Shutdown'}</span></div></div>
             <small className="vlan-badge" title={switchPort.mode === 'trunk' ? `802.1Q trunk carrying ${(switchPort.allowedVlans || []).join(', ') || 'all configured VLANs'}` : `VLAN ${switchPort.accessVlan}: ${vlanName || 'Unnamed'}`}><b>{switchPort.mode === 'trunk' ? '802.1Q trunk' : `VLAN ${switchPort.accessVlan}`}</b><em>{switchPort.mode === 'trunk' ? ((switchPort.allowedVlans || []).join(', ') || 'All VLANs') : (vlanName || 'Unnamed')}</em></small>
             {connectMode ? <button className="port-connect" disabled={isConnected || !switchPort.enabled} onClick={() => onConnectPort(item.instanceId, port.id)}>{isConnected ? 'Linked' : !switchPort.enabled ? 'Shutdown' : isPending ? 'Selected' : 'Connect'}</button> : <span className={`port-link-state ${isConnected ? 'linked' : switchPort.enabled ? 'available' : 'shutdown'}`}>{isConnected ? 'Linked' : switchPort.enabled ? 'Available' : 'Shutdown'}</span>}
+            {peerDetails}
           </div>;
           return <div className={`port-row ${isPending ? 'pending' : ''}`} key={port.id}>
             <div className={`port-symbol ${port.kind}`}><EthernetPort size={14}/></div>
-            <div><strong>{port.label}</strong><span>{isConnected ? linkedTo : describePort(port)}</span></div>
+            <div><strong>{port.label}</strong><span>{isConnected ? 'Physical link active' : describePort(port)}</span></div>
             {connectMode ? <button className="port-connect" disabled={isConnected} onClick={() => onConnectPort(item.instanceId, port.id)}>{isConnected ? 'Linked' : isPending ? 'Selected' : 'Connect'}</button> : <span className={`port-link-state ${isConnected ? 'linked' : 'available'}`}>{isConnected ? 'Linked' : 'Available'}</span>}
+            {peerDetails}
           </div>;
         })}</div>
-      </section>
+      </InspectorSection>
       {(item.id === 'firewall-ngfw' || item.id === 'router-advanced') && <VlanSubinterfaceEditor item={item} ports={ports} onNgfwChange={onNgfwChange} onRouterChange={onRouterChange}/>} 
       {item.id === 'switch-managed' && <ManagedSwitchSummary item={item} ports={ports}/>} 
-      <section className="inspector-section">
-        <h3>IP interfaces</h3>
-        {[...ports.filter(port => ['routed', 'endpoint', 'endpoint-wireless'].includes(port.kind)).map(port => ({ id: port.id, label: port.label })), ...bridgeIds.map(id => ({ id, label: `${id.toUpperCase()} bridge` }))].map(networkInterface => {
+      <InspectorSection key={`${item.instanceId}-interfaces`} title="IP interfaces" badge={networkInterfaces.length || 'None'} defaultOpen={item.id !== 'switch-managed'}>
+        {networkInterfaces.map(networkInterface => {
           const provisioned = item.ispProvisioning?.[networkInterface.id];
           const providerLocked = ['internet', 'isp-network'].includes(item.id);
           const locked = Boolean(provisioned || providerLocked);
@@ -1718,12 +1903,11 @@ function DeviceInspector({ item, onClose, onInterfaceChange, onGatewayChange, co
           <input id={`gateway-${item.instanceId}`} aria-label="Default gateway" placeholder="Example: 10.1.10.1" value={item.gateway || ''} onChange={event => onGatewayChange(item.instanceId, event.target.value)}/>
           <p>Required to reach devices outside this endpoint’s local subnet.</p>
         </div>}
-        {!ports.some(port => ['routed', 'endpoint', 'endpoint-wireless'].includes(port.kind)) && !bridgeIds.length && <p>No configurable IP interfaces.</p>}
-      </section>
-      <section className="inspector-section">
-        <h3>Enabled capabilities</h3>
+        {!networkInterfaces.length && <p>No configurable IP interfaces.</p>}
+      </InspectorSection>
+      <InspectorSection key={`${item.instanceId}-capabilities`} title="Enabled capabilities" badge={featureLabels(item.capabilities || definition.capabilities).length}>
         <div className="inspector-capabilities">{featureLabels(item.capabilities || definition.capabilities).map(feature => <span key={feature}>✓ {feature}</span>)}</div>
-      </section>
+      </InspectorSection>
     </>}
     </div>
   </aside>;
@@ -1733,8 +1917,7 @@ function ManagedSwitchSummary({ item, ports }) {
   const switching = item.switching;
   if (!switching) return null;
   const isSaved = item.startupSwitching && JSON.stringify(item.startupSwitching) === JSON.stringify(switching);
-  return <section className="inspector-section switch-summary">
-    <h3>Switch configuration <span className={isSaved ? 'config-saved' : 'config-unsaved'}>{isSaved ? 'Saved' : 'Unsaved'}</span></h3>
+  return <InspectorSection title="VLANs and switch state" badge={isSaved ? 'Saved' : 'Unsaved'} defaultOpen className={`switch-summary ${isSaved ? 'config-saved' : 'config-unsaved'}`}>
     <div className="switch-identity"><span>Hostname</span><strong>{switching.hostname}</strong></div>
     <div className="vlan-summary-list">{Object.entries(switching.vlans).sort((a, b) => Number(a[0]) - Number(b[0])).map(([vlanId, vlanName]) => {
       const members = Object.entries(switching.ports).filter(([, config]) => String(config.accessVlan) === vlanId).map(([portId]) => ports.find(port => port.id === portId)?.label || portId);
@@ -1745,7 +1928,7 @@ function ManagedSwitchSummary({ item, ports }) {
     })}</div>
     <div className="vlan-summary-list">{Object.entries(switching.ports).filter(([, config]) => config.mode === 'trunk').map(([portId, config]) => <div className="vlan-summary" key={`trunk-${portId}`}><span>{ports.find(port => port.id === portId)?.label || portId}</span><div><strong>802.1Q trunk</strong><small>Allowed VLANs: {config.allowedVlans?.length ? config.allowedVlans.join(', ') : 'All configured VLANs'}</small></div></div>)}</div>
     <p className="switch-summary-hint">Changes shown here are active immediately. Use <code>write memory</code> in the command line to mark the running configuration as saved.</p>
-  </section>;
+  </InspectorSection>;
 }
 
 function loadTerminalState(key, createSession, initialLines) {
@@ -1764,12 +1947,25 @@ function saveTerminalState(key, session, command, lines, history) {
   catch { /* Terminal persistence must not interrupt configuration. */ }
 }
 
+function clearTerminalStates(devices = []) {
+  const instanceIds = new Set(devices.map(device => device?.instanceId).filter(Boolean));
+  const terminalPrefixes = ['packettracker-terminal-switch-', 'packettracker-terminal-ngfw-', 'packettracker-terminal-firewall-', 'packettracker-terminal-router-'];
+  for (const instanceId of instanceIds) for (const prefix of terminalPrefixes) localStorage.removeItem(`${prefix}${instanceId}`);
+}
+
 function shouldCloseCli(session, entered) {
   const command = entered.trim().toLowerCase().replace(/\s+/g, ' ');
   return command === 'end' || (command === 'exit' && ['user', 'privileged'].includes(session.mode));
 }
 
-function ManagedSwitchTerminal({ item, onSwitchingChange, onDone }) {
+function focusTerminalCommandInput(event) {
+  if (event.target.closest('input, button, a, select, textarea')) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed) return;
+  event.currentTarget.querySelector('.terminal-input input')?.focus();
+}
+
+function ManagedSwitchTerminal({ item, showHelp = true, onSwitchingChange, onDone }) {
   const initialLines = ['PacketTracker Managed Switch CLI', 'Type ? to list available commands.'];
   const storageKey = `packettracker-terminal-switch-${item.instanceId}`;
   const initialState = useRef(loadTerminalState(storageKey, createSwitchCliSession, initialLines)).current;
@@ -1824,19 +2020,19 @@ function ManagedSwitchTerminal({ item, onSwitchingChange, onDone }) {
     }
   }
 
-  return <section className="switch-terminal-section">
+  return <section className="switch-terminal-section" onClick={focusTerminalCommandInput}>
     <div className="terminal-status"><span className="terminal-dot"/> Interactive configuration <small>{item.startupSwitching ? 'Saved configuration available' : 'Unsaved configuration'}</small></div>
     <div className="switch-terminal" ref={outputRef} aria-live="polite">{lines.map((line, index) => <div key={`${index}-${line}`}>{line || ' '}</div>)}</div>
     <form className="terminal-input" onSubmit={runCommand}>
       <label>{switchPrompt(session, item.switching)}</label>
       <input autoFocus value={command} onChange={event => setCommand(event.target.value)} onKeyDown={navigateHistory} autoComplete="off" spellCheck="false" aria-label="Switch command" />
     </form>
-    <p className="terminal-help">Trunk: select a port, then use <code>switchport trunk encapsulation dot1q</code>, <code>switchport mode trunk</code>, and <code>switchport trunk allowed vlan 10,20</code>.</p>
+    {showHelp && <p className="terminal-help">Trunk: select a port, then use <code>switchport trunk encapsulation dot1q</code>, <code>switchport mode trunk</code>, and <code>switchport trunk allowed vlan 10,20</code>.</p>}
   </section>;
 }
 
-function NgfwTerminal({ item, onNgfwChange, onFirewallChange, onDone }) {
-  const initialLines = ['PacketTracker NGFW CLI', 'Start with: enable, configure terminal', 'For a trunk: interface inside.10, encapsulation dot1Q 10, then ip address 10.1.10.254/24', 'ASA-style "vlan 10" is also accepted. Type ? for available commands.'];
+function NgfwTerminal({ item, showHelp = true, onNgfwChange, onFirewallChange, onDone }) {
+  const initialLines = ['PacketTracker NGFW CLI', 'Start with: enable, configure terminal', 'For a trunk: configure interface inside with mode trunk before creating interface inside.10', 'Then use encapsulation dot1Q 10 and ip address 10.1.10.254/24. Type ? for available commands.'];
   const storageKey = `packettracker-terminal-ngfw-${item.instanceId}`;
   const initialState = useRef(loadTerminalState(storageKey, createNgfwCliSession, initialLines)).current;
   const [session, setSession] = useState(initialState.session);
@@ -1878,18 +2074,18 @@ function NgfwTerminal({ item, onNgfwChange, onFirewallChange, onDone }) {
     else if (event.key === 'ArrowDown') { event.preventDefault(); historyIndex.current = Math.min(commandHistory.current.length, historyIndex.current + 1); setCommand(commandHistory.current[historyIndex.current] || ''); }
   }
 
-  return <section className="switch-terminal-section">
+  return <section className="switch-terminal-section" onClick={focusTerminalCommandInput}>
     <div className="terminal-status"><span className="terminal-dot"/> Interactive firewall configuration <small>{item.startupNgfw ? 'Saved configuration available' : 'Unsaved configuration'}</small></div>
     <div className="switch-terminal" ref={outputRef} aria-live="polite">{lines.map((line, index) => <div key={`${index}-${line}`}>{line || ' '}</div>)}</div>
     <form className="terminal-input" onSubmit={runCommand}>
       <label>{ngfwPrompt(session, item.ngfw)}</label>
       <input autoFocus value={command} onChange={event => setCommand(event.target.value)} onKeyDown={navigateHistory} autoComplete="off" spellCheck="false" aria-label="Firewall command" />
     </form>
-    <p className="terminal-help">Security policy: <code>policy 10</code>, then set <code>source-zone</code>, <code>destination-zone</code>, <code>protocol</code>, and <code>action</code>. Use <code>show policies</code> to verify order.</p>
+    {showHelp && <p className="terminal-help">Security policy: <code>policy 10</code>, then set <code>source-zone</code>, <code>destination-zone</code>, <code>protocol</code>, and <code>action</code>. Use <code>show policies</code> to verify order.</p>}
   </section>;
 }
 
-function FirewallPolicyTerminal({ item, onFirewallChange, onDone }) {
+function FirewallPolicyTerminal({ item, showHelp = true, onFirewallChange, onDone }) {
   const initialLines = ['PacketTracker Firewall CLI', 'Start with: enable, configure terminal', 'Create an ordered rule with: policy 10', 'Type ? for available commands.'];
   const storageKey = `packettracker-terminal-firewall-${item.instanceId}`;
   const initialState = useRef(loadTerminalState(storageKey, createFirewallCliSession, initialLines)).current;
@@ -1907,10 +2103,10 @@ function FirewallPolicyTerminal({ item, onFirewallChange, onDone }) {
     commandHistory.current.push(entered); historyIndex.current = commandHistory.current.length; setCommand(''); if (shouldCloseCli(session, entered)) onDone?.();
   }
   function navigateHistory(event) { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); setLines([]); } else if (event.key === 'ArrowUp') { event.preventDefault(); historyIndex.current = Math.max(0, historyIndex.current - 1); setCommand(commandHistory.current[historyIndex.current] || ''); } else if (event.key === 'ArrowDown') { event.preventDefault(); historyIndex.current = Math.min(commandHistory.current.length, historyIndex.current + 1); setCommand(commandHistory.current[historyIndex.current] || ''); } }
-  return <section className="switch-terminal-section"><div className="terminal-status"><span className="terminal-dot"/> Ordered firewall policy configuration <small>{item.startupFirewall ? 'Saved configuration available' : 'Unsaved configuration'}</small></div><div className="switch-terminal" ref={outputRef} aria-live="polite">{lines.map((line, index) => <div key={`${index}-${line}`}>{line || ' '}</div>)}</div><form className="terminal-input" onSubmit={runCommand}><label>{firewallPrompt(session, item.customName || item.name)}</label><input autoFocus value={command} onChange={event => setCommand(event.target.value)} onKeyDown={navigateHistory} autoComplete="off" spellCheck="false" aria-label="Firewall policy command"/></form><p className="terminal-help">Policies use first-match order. Leave gaps such as 10, 20, 30 so another rule can be inserted later. Finish with an explicit catch-all policy, such as <code>policy 10000</code> followed by <code>action deny</code>.</p></section>;
+  return <section className="switch-terminal-section" onClick={focusTerminalCommandInput}><div className="terminal-status"><span className="terminal-dot"/> Ordered firewall policy configuration <small>{item.startupFirewall ? 'Saved configuration available' : 'Unsaved configuration'}</small></div><div className="switch-terminal" ref={outputRef} aria-live="polite">{lines.map((line, index) => <div key={`${index}-${line}`}>{line || ' '}</div>)}</div><form className="terminal-input" onSubmit={runCommand}><label>{firewallPrompt(session, item.customName || item.name)}</label><input autoFocus value={command} onChange={event => setCommand(event.target.value)} onKeyDown={navigateHistory} autoComplete="off" spellCheck="false" aria-label="Firewall policy command"/></form>{showHelp && <p className="terminal-help">Policies use first-match order. Leave gaps such as 10, 20, 30 so another rule can be inserted later. Finish with an explicit catch-all policy, such as <code>policy 10000</code> followed by <code>action deny</code>.</p>}</section>;
 }
 
-function RouterTerminal({ item, onRouterChange, onDone }) {
+function RouterTerminal({ item, showHelp = true, onRouterChange, onDone }) {
   const initialLines = ['PacketTracker Advanced Router CLI', 'Type ? to list available commands.', '802.1Q example: interface gigabitEthernet 0/0.10'];
   const storageKey = `packettracker-terminal-router-${item.instanceId}`;
   const initialState = useRef(loadTerminalState(storageKey, createRouterCliSession, initialLines)).current;
@@ -1946,11 +2142,11 @@ function RouterTerminal({ item, onRouterChange, onDone }) {
     if (event.key === 'ArrowUp') { event.preventDefault(); historyIndex.current = Math.max(0, historyIndex.current - 1); setCommand(commandHistory.current[historyIndex.current] || ''); }
     else if (event.key === 'ArrowDown') { event.preventDefault(); historyIndex.current = Math.min(commandHistory.current.length, historyIndex.current + 1); setCommand(commandHistory.current[historyIndex.current] || ''); }
   }
-  return <section className="switch-terminal-section">
+  return <section className="switch-terminal-section" onClick={focusTerminalCommandInput}>
     <div className="terminal-status"><span className="terminal-dot"/> Interactive router configuration <small>{item.startupRouterConfig ? 'Saved configuration available' : 'Unsaved configuration'}</small></div>
     <div className="switch-terminal" ref={outputRef} aria-live="polite">{lines.map((line, index) => <div key={`${index}-${line}`}>{line || ' '}</div>)}</div>
     <form className="terminal-input" onSubmit={runCommand}><label>{routerPrompt(session, item.routerConfig)}</label><input autoFocus value={command} onChange={event => setCommand(event.target.value)} onKeyDown={navigateHistory} autoComplete="off" spellCheck="false" aria-label="Router command"/></form>
-    <p className="terminal-help">Create <code>interface gigabitEthernet 0/0.10</code>, then explicitly set <code>encapsulation dot1Q 10</code> and <code>ip address 10.1.10.254 255.255.255.0</code>.</p>
+    {showHelp && <p className="terminal-help">Create <code>interface gigabitEthernet 0/0.10</code>, then explicitly set <code>encapsulation dot1Q 10</code> and <code>ip address 10.1.10.254 255.255.255.0</code>.</p>}
   </section>;
 }
 
@@ -2019,13 +2215,14 @@ function VlanSubinterfaceEditor({ item, ports, onNgfwChange, onRouterChange }) {
   </section>;
 }
 
-function PlacedDevice({ item, selected, pingSource, ipConflicts, interactionMode, zoom, cancelToken, onPingTarget, onConnect, onContextMenu, onSelect, onMove, onDelete }) {
+function PlacedDevice({ item, selected, pingSource, broadcastSource, broadcastRecipient, ipConflicts, interactionMode, zoom, cancelToken, onPingTarget, onConnect, onContextMenu, onSelect, onMove, onDelete }) {
   const Icon = item.icon;
   const physicalPorts = getDeviceDefinition(item.id)?.ports || [];
   const portSummary = physicalPorts.length === 1 ? `1 physical port · ${physicalPorts[0].label}` : physicalPorts.length ? `${physicalPorts.length} physical ports · ${physicalPorts.map(port => port.label).join(', ')}` : 'No physical network ports';
   const [dragging, setDragging] = useState(false);
   const offset = useRef({ x: 0, y: 0 });
   const dragOrigin = useRef(null);
+  const pointerMoved = useRef(false);
 
   useEffect(() => {
     if (!dragging || !dragOrigin.current) return;
@@ -2045,18 +2242,17 @@ function PlacedDevice({ item, selected, pingSource, ipConflicts, interactionMode
       onPingTarget(item.instanceId);
       return;
     }
-    onSelect(item.instanceId);
-    setDragging(true);
+    pointerMoved.current = false;
     dragOrigin.current = { x: item.x, y: item.y };
     offset.current = { clientX: event.clientX, clientY: event.clientY, x: item.x, y: item.y };
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
-  return <div className={`placed-device ${selected ? 'selected' : ''} ${pingSource ? 'ping-source' : ''} ${dragging ? 'dragging' : ''} ${ipConflicts.length ? 'configuration-error' : ''}`} style={{ left: item.x, top: item.y, '--device-color': item.color }}
+  return <div className={`placed-device ${selected ? 'selected' : ''} ${pingSource ? 'ping-source' : ''} ${broadcastSource ? 'broadcast-source' : ''} ${broadcastRecipient ? 'broadcast-recipient' : ''} ${dragging ? 'dragging' : ''} ${ipConflicts.length ? 'configuration-error' : ''}`} style={{ left: item.x, top: item.y, '--device-color': item.color }}
     onContextMenu={onContextMenu}
     onPointerDown={pointerDown}
-    onPointerMove={event => { if (dragging) { const movementScale = displayScale() * (zoom / 100); onMove(item.instanceId, Math.max(-CANVAS_ORIGIN_X + 8, offset.current.x + (event.clientX - offset.current.clientX) / movementScale), Math.max(-CANVAS_ORIGIN_Y + 8, offset.current.y + (event.clientY - offset.current.clientY) / movementScale)); } }}
-    onPointerUp={() => { setDragging(false); dragOrigin.current = null; }}>
+    onPointerMove={event => { if (dragOrigin.current) { const deltaX = event.clientX - offset.current.clientX, deltaY = event.clientY - offset.current.clientY; if (!pointerMoved.current && Math.hypot(deltaX, deltaY) < 4) return; pointerMoved.current = true; if (!dragging) setDragging(true); const movementScale = displayScale() * (zoom / 100); onMove(item.instanceId, Math.max(-CANVAS_ORIGIN_X + 8, offset.current.x + deltaX / movementScale), Math.max(-CANVAS_ORIGIN_Y + 8, offset.current.y + deltaY / movementScale)); } }}
+    onPointerUp={() => { if (!pointerMoved.current && dragOrigin.current) onSelect(item.instanceId); setDragging(false); pointerMoved.current = false; dragOrigin.current = null; }}>
     {selected && <button className="delete-device" onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onDelete(); }}><Trash2 size={13}/></button>}
     {!!ipConflicts.length && <><span className="device-error-badge" title="Duplicate IP address"><TriangleAlert size={13}/></span><span className="device-error-label">IP conflict: {[...new Set(ipConflicts.map(conflict => conflict.address))].join(', ')}</span></>}
     <div className="placed-icon"><Icon size={29}/><span className="port-light"/></div>
@@ -2081,7 +2277,20 @@ function ActivityInstructionsPanel({ activity, tab, onTabChange, width, onWidthC
   const [revealed, setRevealed] = useState([]);
   const resize = useRef(null);
   const progress = points?.all || { passed: 0, total: 0 };
-  const requirementName = requirement => requirement.title || (requirement.type === 'relationship' ? `${specification?.roles?.find(role => role.id === requirement.from)?.name || requirement.from} → ${specification?.roles?.find(role => role.id === requirement.to)?.name || requirement.to}` : requirement.type === 'constraint' ? 'Network separation' : 'Device configuration');
+  const roles = [...(evaluation?.roleStatus || [])].sort((left, right) => Number(left.status === 'passed') - Number(right.status === 'passed'));
+  const requirements = evaluation?.requirements || [];
+  const pendingRoles = roles.filter(item => item.status !== 'passed');
+  const completedRoles = roles.filter(item => item.status === 'passed');
+  const requirementName = requirement => requirement.title || (requirement.type === 'relationship' ? `${specification?.roles?.find(role => role.id === requirement.from)?.name || requirement.from} → ${specification?.roles?.find(role => role.id === requirement.to)?.name || requirement.to}` : requirement.type === 'constraint' ? `${(requirement.roles || []).map(roleId => specification?.roles?.find(role => role.id === roleId)?.name || roleId).join(' ↔ ') || 'Network'} separation` : 'Device configuration');
+  const checkName = check => check.displayName || String(check.id || 'check').replace(/[-_]+/g, ' ').replace(/\b\w/g, character => character.toUpperCase());
+  const requirementChallenges = requirements.flatMap(requirement => requirement.checks?.length
+    ? requirement.checks.map(check => ({ ...check, id: `${requirement.id}:${check.id}`, challengeTitle: ['relationship', 'constraint'].includes(requirement.type) ? requirementName(requirement) : `${requirementName(requirement)} · ${checkName(check)}` }))
+    : [{ ...requirement, challengeTitle: requirementName(requirement) }]);
+  const pendingRequirements = requirementChallenges.filter(item => item.status !== 'passed');
+  const completedRequirements = requirementChallenges.filter(item => item.status === 'passed');
+  const completedItemCount = completedRoles.length + completedRequirements.length;
+  const roleItem = role => <div className={`activity-progress-item ${role.status}`} key={role.roleId}><i/><span><strong>{role.name}</strong><small>{role.compatible} of {role.required} assigned</small></span><b>{role.status === 'passed' ? 'Complete' : 'Needs work'}</b></div>;
+  const requirementItem = requirement => <div className={`activity-progress-item ${requirement.status}`} key={requirement.id}><i/><span><strong>{requirement.challengeTitle}</strong><small>{requirement.reason || (requirement.status === 'passed' ? 'This check is complete.' : 'Review this requirement.')}</small></span><b>{requirement.status === 'passed' ? 'Complete' : requirement.status === 'not_evaluable' ? 'Not ready' : 'Needs work'}</b></div>;
   function startResize(event) { event.preventDefault(); event.stopPropagation(); resize.current = { pointerId: event.pointerId }; event.currentTarget.setPointerCapture(event.pointerId); }
   function continueResize(event) { if (resize.current) onWidthChange(Math.max(300, Math.min(650, window.innerWidth - event.clientX))); }
   function stopResize(event) { resize.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }
@@ -2095,20 +2304,202 @@ function ActivityInstructionsPanel({ activity, tab, onTabChange, width, onWidthC
         {!!instruction.hints?.length && <section><h3>Hints</h3><div className="activity-hints">{instruction.hints.map((hint, index) => revealed.includes(index) ? <p key={hint}>{hint}</p> : <button key={hint} onClick={() => { setRevealed(current => [...current, index]); onUseHint?.(`hint-${index + 1}`); }}>Reveal hint {index + 1}</button>)}</div></section>}
       </div> : <div className="activity-challenge-body">
         <div className="activity-challenge-progress"><div><strong>{progress.passed} of {progress.total} complete</strong><span>{progress.total && progress.passed === progress.total ? 'Ready to check and complete' : `${Math.max(0, progress.total - progress.passed)} checks remaining`}</span></div><i><b style={{ width: `${progress.total ? progress.passed / progress.total * 100 : 0}%` }}/></i></div>
-        <section><h3>Devices and roles</h3>{evaluation?.roleStatus?.map(role => <div className={`activity-progress-item ${role.status}`} key={role.roleId}><i/><span><strong>{role.name}</strong><small>{role.compatible} of {role.required} assigned</small></span><b>{role.status === 'passed' ? 'Complete' : 'Needs work'}</b></div>)}</section>
-        <section><h3>Network requirements</h3>{evaluation?.requirements?.map(requirement => { const incomplete = requirement.checks?.find(check => check.status !== 'passed'); return <div className={`activity-progress-item ${requirement.status}`} key={requirement.id}><i/><span><strong>{requirementName(requirement)}</strong><small>{requirement.status === 'passed' ? 'All checks complete.' : requirement.reason || incomplete?.reason || 'Review this requirement.'}</small></span><b>{requirement.status === 'passed' ? 'Complete' : requirement.status === 'not_evaluable' ? 'Not ready' : 'Needs work'}</b></div>; })}</section>
+        <div className="activity-pending-groups">
+          {!!pendingRoles.length && <section><h3>Devices and roles <span>{pendingRoles.length} need work</span></h3>{pendingRoles.map(roleItem)}</section>}
+          {!!pendingRequirements.length && <section><h3>Network requirements <span>{pendingRequirements.length} need work</span></h3>{pendingRequirements.map(requirementItem)}</section>}
+        </div>
+        {!!completedItemCount && <section className="activity-completed-groups">
+          <details><summary><span><i>✓</i><strong>Completed challenges</strong></span><b>{completedItemCount} item{completedItemCount === 1 ? '' : 's'} completed</b><ChevronDown size={16}/></summary><div>
+            {!!completedRoles.length && <section className="completed-challenge-category"><h4>Devices and roles</h4>{completedRoles.map(roleItem)}</section>}
+            {!!completedRequirements.length && <section className="completed-challenge-category"><h4>Network requirements</h4>{completedRequirements.map(requirementItem)}</section>}
+          </div></details>
+        </section>}
       </div>}
   </aside>;
 }
 
-function ActivityResultModal({ result, level, onClose, onBack }) {
+function electricNoise(value) {
+  const x = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
+  return (x - Math.floor(x)) * 2 - 1;
+}
+
+function electricPath(start, end, seed, amplitude = 7) {
+  const dx = end.x - start.x, dy = end.y - start.y;
+  const length = Math.max(1, Math.hypot(dx, dy));
+  const normalX = -dy / length, normalY = dx / length;
+  const points = [`M ${start.x} ${start.y}`];
+  const sections = Math.max(10, Math.min(34, Math.round(length / 13)));
+  for (let index = 1; index < sections; index += 1) {
+    const progress = index / sections;
+    const taper = Math.sin(progress * Math.PI);
+    const alternatingSnap = (index % 2 ? 1 : -1) * (.35 + Math.abs(electricNoise(seed + index * 17)) * .65);
+    const displacement = (electricNoise(seed * 31 + index * 7) * .72 + alternatingSnap * .58) * amplitude * taper;
+    points.push(`L ${start.x + dx * progress + normalX * displacement} ${start.y + dy * progress + normalY * displacement}`);
+  }
+  points.push(`L ${end.x} ${end.y}`);
+  return points.join(' ');
+}
+
+function NetworkElectricCelebration({ devices, connections, proficiency }) {
+  const startedAt = useRef(performance.now());
+  const [tick, setTick] = useState(0);
+  const independent = proficiency === 'independent';
+  useEffect(() => {
+    const timer = setInterval(() => setTick(value => value + 1), independent ? 42 : 56);
+    return () => clearInterval(timer);
+  }, [independent]);
+  const propagation = useMemo(() => {
+    const byId = new Map(devices.map(device => [device.instanceId, device]));
+    const edges = connections.map((connection, index) => ({ connection, index, a: byId.get(connection.a.deviceId), b: byId.get(connection.b.deviceId) })).filter(edge => edge.a && edge.b);
+    const adjacency = new Map(devices.map(device => [device.instanceId, []]));
+    for (const edge of edges) {
+      adjacency.get(edge.a.instanceId).push(edge.b.instanceId);
+      adjacency.get(edge.b.instanceId).push(edge.a.instanceId);
+    }
+    const score = device => {
+      const id = String(device.id || '').toLowerCase();
+      const role = id.includes('internet') || id.includes('wan') ? 100 : id.includes('router') ? 80 : id.includes('firewall') ? 70 : id.includes('switch') ? 55 : 0;
+      return role + (adjacency.get(device.instanceId)?.length || 0) * 4;
+    };
+    const orderedRoots = [...devices].sort((left, right) => score(right) - score(left));
+    const rawDelay = new Map();
+    const unvisited = new Set(devices.map(device => device.instanceId));
+    let componentOffset = 0;
+    for (const candidate of orderedRoots) {
+      if (!unvisited.has(candidate.instanceId)) continue;
+      const queue = [{ id: candidate.instanceId, depth: 0 }];
+      unvisited.delete(candidate.instanceId);
+      let componentDepth = 0;
+      while (queue.length) {
+        const current = queue.shift();
+        componentDepth = Math.max(componentDepth, current.depth);
+        rawDelay.set(current.id, componentOffset + current.depth);
+        for (const neighbor of adjacency.get(current.id) || []) if (unvisited.has(neighbor)) {
+          unvisited.delete(neighbor);
+          queue.push({ id: neighbor, depth: current.depth + 1 });
+        }
+      }
+      componentOffset += componentDepth + 1.25;
+    }
+    const maximum = Math.max(1, ...rawDelay.values());
+    const nodeDelay = new Map([...rawDelay].map(([id, delay]) => [id, 480 + delay / maximum * 1550]));
+    return { edges, nodeDelay };
+  }, [devices, connections]);
+  const elapsed = performance.now() - startedAt.current;
+  const finalSurge = elapsed >= 2250;
+  // The topology overlay is removed when the three-second build ends. Keep its
+  // former local finale beyond that boundary so it cannot compete with the
+  // viewport-wide firework during a delayed animation frame.
+  const finalBurst = elapsed >= 3400;
+  return <svg className={`network-electric-layer ${independent ? 'independent' : 'guided'} ${finalSurge ? 'final-surge' : ''} ${finalBurst ? 'final-burst' : ''}`} width="2800" height="1800" aria-hidden="true">
+    <defs>
+      <filter id="electric-bloom" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation={independent ? '6' : '4'} result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <filter id="device-bloom" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="8" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <linearGradient id="guided-plasma" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stopColor="#126eff"/><stop offset=".42" stopColor="#00d9ff"/><stop offset=".72" stopColor="#b8f7ff"/><stop offset="1" stopColor="#25a9ff"/></linearGradient>
+      <linearGradient id="independent-plasma" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stopColor="#1479ff"/><stop offset=".34" stopColor="#00e1ff"/><stop offset=".62" stopColor="#70ffd0"/><stop offset=".84" stopColor="#16e88c"/><stop offset="1" stopColor="#37bfff"/></linearGradient>
+    </defs>
+    <g className="electric-device-charge">{devices.map((device, index) => <rect key={`charge-${device.instanceId}`} x={device.x - 6} y={device.y - 6} width="65" height="57" rx="12" style={{ '--electric-index': index }} />)}</g>
+    <g className="electric-cables">{propagation.edges.map(edge => {
+      const aDelay = propagation.nodeDelay.get(edge.a.instanceId) || 520, bDelay = propagation.nodeDelay.get(edge.b.instanceId) || 520;
+      const source = aDelay <= bDelay ? edge.a : edge.b, destination = source === edge.a ? edge.b : edge.a;
+      const start = { x: source.x + 27, y: source.y + 23 }, end = { x: destination.x + 27, y: destination.y + 23 };
+      const delay = Math.min(aDelay, bDelay) + 90;
+      const local = elapsed - delay;
+      if (local < 0) return null;
+      const active = local < (independent ? 920 : 760);
+      const seed = tick + edge.index * 19;
+      const path = electricPath(start, end, seed, independent ? 13 : 10);
+      const travel = Math.max(0, Math.min(1, local / (independent ? 920 : 760)));
+      const sparkX = start.x + (end.x - start.x) * travel + electricNoise(seed + 2) * 3;
+      const sparkY = start.y + (end.y - start.y) * travel + electricNoise(seed + 8) * 3;
+      const mid = { x: start.x + (end.x - start.x) * travel, y: start.y + (end.y - start.y) * travel };
+      const branchEnd = { x: mid.x + electricNoise(seed + 13) * (independent ? 28 : 18), y: mid.y + electricNoise(seed + 21) * (independent ? 28 : 18) };
+      const branchEndTwo = { x: mid.x + electricNoise(seed + 39) * (independent ? 36 : 22), y: mid.y + electricNoise(seed + 53) * (independent ? 36 : 22) };
+      const revealStyle = active ? { strokeDasharray: `${Math.max(.03, travel)} 1` } : undefined;
+      const plasmaStyle = active ? { strokeDasharray: `${Math.max(.04, travel)} 1` } : undefined;
+      return <g key={edge.connection.id} className={active ? 'active' : 'afterglow'}>
+        <path className="plasma-flow" pathLength="1" style={plasmaStyle} d={path}/>
+        <path className="electric-trail" pathLength="1" style={revealStyle} d={path}/><path className="electric-glow" pathLength="1" style={revealStyle} d={path}/><path className="electric-core" pathLength="1" style={revealStyle} d={path}/>
+        {active && <><path className="electric-branch" d={electricPath(mid, branchEnd, seed + 30, 6)}/><path className="electric-branch secondary-branch" d={electricPath(mid, branchEndTwo, seed + 61, 7)}/><circle className="plasma-front-outer" cx={sparkX} cy={sparkY} r={independent ? 11 : 8}/><circle className="plasma-front" cx={sparkX} cy={sparkY} r={independent ? 5.2 : 4.2}/><circle className="electric-spark" cx={sparkX} cy={sparkY} r={independent ? 2.8 : 2.2}/></>}
+        {independent && active && <><path className="electric-secondary" d={electricPath(start, end, seed + 47, 16)}/><path className="electric-green-glow" d={electricPath(start, end, seed + 83, 11)}/></>}
+      </g>;
+    })}</g>
+    <g className="electric-devices">{devices.map(device => {
+      const activated = elapsed >= (propagation.nodeDelay.get(device.instanceId) || 520);
+      return activated ? <g key={device.instanceId} className="electric-device-active"><rect x={device.x - 7} y={device.y - 7} width="67" height="59" rx="13"/><circle cx={device.x + 27} cy={device.y + 23} r="31"/></g> : null;
+    })}</g>
+    {finalBurst && <g className="electric-finale-burst">{devices.flatMap((device, deviceIndex) => {
+      const center = { x: device.x + 27, y: device.y + 23 };
+      return [0, 1, 2, 3].map(ray => {
+        const seed = tick * 3 + deviceIndex * 41 + ray * 17;
+        const angle = ray * Math.PI / 2 + electricNoise(seed) * .48;
+        const distance = 25 + Math.abs(electricNoise(seed + 9)) * 25;
+        const startDistance = 19;
+        const start = { x: center.x + Math.cos(angle) * startDistance, y: center.y + Math.sin(angle) * startDistance };
+        const end = { x: center.x + Math.cos(angle) * distance, y: center.y + Math.sin(angle) * distance };
+        return <path key={`${device.instanceId}-${ray}`} style={{ '--burst-delay': `${(deviceIndex * 37 + ray * 61) % 240}ms` }} d={electricPath(start, end, seed + 73, independent ? 8 : 6)}/>;
+      });
+    })}</g>}
+    {finalBurst && <g className="network-plasma-firework">
+      <g className="plasma-network-silhouette">{propagation.edges.map(edge => {
+        const start = { x: edge.a.x + 27, y: edge.a.y + 23 };
+        const end = { x: edge.b.x + 27, y: edge.b.y + 23 };
+        return <path key={`burst-shape-${edge.connection.id}`} d={electricPath(start, end, edge.index * 43 + 211, independent ? 13 : 10)}/>;
+      })}</g>
+      <g className="network-plasma-confetti">{propagation.edges.map(edge => {
+        const start = { x: edge.a.x + 27, y: edge.a.y + 23 };
+        const end = { x: edge.b.x + 27, y: edge.b.y + 23 };
+        return <g key={`confetti-${edge.connection.id}`}>{Array.from({ length: 5 }, (_, sampleIndex) => {
+          const progress = (sampleIndex + .5) / 5;
+          const originX = start.x + (end.x - start.x) * progress;
+          const originY = start.y + (end.y - start.y) * progress;
+          return Array.from({ length: 5 }, (_, particleIndex) => {
+            const seed = edge.index * 307 + sampleIndex * 67 + particleIndex * 29 + 19;
+            const angle = particleIndex * Math.PI * 2 / 5 + electricNoise(seed) * .72;
+            const distance = 48 + Math.abs(electricNoise(seed + 11)) * (independent ? 125 : 100);
+            const x = Math.cos(angle) * distance;
+            const y = Math.sin(angle) * distance;
+            const delay = 105 + (edge.index * 23 + sampleIndex * 19 + particleIndex * 13) % 150;
+            const hue = independent ? 154 + (sampleIndex + particleIndex) % 6 * 15 : 178 + (sampleIndex + particleIndex) % 7 * 13;
+            const particleStyle = { '--confetti-x': `${x}px`, '--confetti-y': `${y}px`, '--confetti-delay': `${delay}ms`, '--confetti-hue': hue };
+            return particleIndex % 2 === 0
+              ? <path key={`${sampleIndex}-${particleIndex}`} className="plasma-confetti-shard" style={particleStyle} d={`M ${originX - 5} ${originY} L ${originX + 5} ${originY}`}/>
+              : <circle key={`${sampleIndex}-${particleIndex}`} className="plasma-confetti-spark" style={particleStyle} cx={originX} cy={originY} r={particleIndex % 3 ? 2.6 : 1.7}/>;
+          });
+        })}</g>;
+      })}</g>
+    </g>}
+  </svg>;
+}
+
+function CompletionTakeover({ phase, onSkip, title, proficiency }) {
+  return <div className={`completion-takeover ${phase}`} role="status" aria-live="polite" aria-label={phase === 'recognition' ? 'Skill completed' : 'Framing completed network'}>
+    <div className="completion-cinematic-shade"/>
+    {phase === 'recognition' && <div className="completion-command-line">
+      <header><span><i/><i/><i/></span><b>packettracker — terminal</b></header>
+      <div><small><em>student@packettracker</em>:~$ finish &quot;{title}&quot;</small><strong><i>&gt;</i> Nice.<b>_</b></strong></div>
+    </div>}
+    {phase === 'electrify' && <div className={`completion-energy-label ${proficiency === 'independent' ? 'independent' : ''}`}><span>NETWORK ENERGIZING</span><i/></div>}
+    {phase === 'burst' && <>
+      <div className={`completion-viewport-firework ${proficiency === 'independent' ? 'independent' : ''}`} aria-hidden="true">
+        <i className="viewport-firework-flash"/><i className="viewport-firework-ring ring-one"/><i className="viewport-firework-ring ring-two"/>
+        <div className="viewport-firework-particles">{Array.from({ length: 72 }, (_, index) => <span key={index} style={{ '--firework-angle': `${index * 137.508}deg`, '--firework-distance': `${38 + index % 9 * 4.5}vmax`, '--firework-delay': `${80 + index % 12 * 18}ms`, '--firework-hue': `${proficiency === 'independent' ? 155 + index % 7 * 14 : 178 + index % 8 * 13}`, '--firework-size': `${2 + index % 4 * 1.5}px` }}/>)}</div>
+        <div className="viewport-firework-fragments">{Array.from({ length: 34 }, (_, index) => <b key={index} style={{ '--firework-angle': `${index * 148.31 + 9}deg`, '--firework-distance': `${34 + index % 8 * 5}vmax`, '--firework-delay': `${135 + index % 10 * 21}ms`, '--firework-hue': `${proficiency === 'independent' ? 160 + index % 6 * 16 : 184 + index % 7 * 15}` }}/>)}</div>
+      </div>
+      <strong className={`plasma-network-complete ${proficiency === 'independent' ? 'independent' : ''}`}>NETWORK COMPLETE</strong>
+    </>}
+    <button autoFocus className="completion-skip" onClick={onSkip} onKeyDown={event => { if (event.key === 'Tab') event.preventDefault(); }}>Skip</button>
+  </div>;
+}
+
+function ActivityResultModal({ result, level, onClose, onContinue, onBack }) {
   const passed = result.evaluation?.completed;
   return <div className="activity-modal-backdrop"><section className={`activity-result-modal ${passed ? 'passed' : 'incomplete'}`} role="dialog" aria-modal="true">
     <div className="activity-result-icon">{passed ? <GraduationCap size={34}/> : <CircleHelp size={34}/>}</div>
     <h2>{passed ? 'Skill completed' : 'Not quite yet'}</h2>
     <p>{passed ? `You completed this activity at the ${levelLabel(result.attempt.awardedLevel || level)} level.` : 'Your work is saved. Review the challenge status, make another change, and check again.'}</p>
     {!passed && result.evaluation?.requirements?.filter(item => item.status !== 'passed').map(item => <small key={item.id}>{item.reason || item.checks?.find(check => check.status !== 'passed')?.reason || 'A network requirement is not complete.'}</small>)}
-    <div>{!passed && <button className="button secondary" onClick={onClose}>Keep working</button>}{passed && <button className="button primary" onClick={onBack}>Return to skills</button>}</div>
+    <div>{!passed && <button className="button secondary" onClick={onClose}>Keep working</button>}{passed && <><button className="button secondary" onClick={onContinue}>Continue working</button><button className="button primary" onClick={onBack}>Back to skills</button></>}</div>
   </section></div>;
 }
 
@@ -2135,6 +2526,7 @@ function PlatformApp() {
   const [activeActivity, setActiveActivity] = useState(null);
   const [dashboardRevision, setDashboardRevision] = useState(0);
   const [dashboardTab, setDashboardTab] = useState('classes');
+  const [dashboardSkillCategory, setDashboardSkillCategory] = useState('all');
   const [difficultyWarning, setDifficultyWarning] = useState(null);
 
   useEffect(() => {
@@ -2145,6 +2537,7 @@ function PlatformApp() {
       try { view = JSON.parse(localStorage.getItem(`packettracker-view-${result.user.id}`) || 'null'); } catch { /* use dashboard */ }
       if (view?.tab) setDashboardTab(view.tab);
       else setDashboardTab(result.user.role === 'student' ? 'projects' : 'classes');
+      if (view?.skillCategory) setDashboardSkillCategory(view.skillCategory);
       if (view?.page === 'activity' && view.attemptId) {
         try {
           let [attempt, activityRecord] = await Promise.all([api(`/api/skill-attempts/${view.attemptId}`), api(`/api/skill-activities/${view.activityId}`)]);
@@ -2189,10 +2582,17 @@ function PlatformApp() {
 
   function showDashboardTab(tab) {
     setDashboardTab(tab);
-    if (user) localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'dashboard', tab }));
+    if (user) localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'dashboard', tab, skillCategory: dashboardSkillCategory }));
+  }
+
+  function showSkillCategory(category) {
+    setDashboardSkillCategory(category);
+    if (user) localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'dashboard', tab: 'skills', skillCategory: category }));
   }
 
   async function openSkillActivity(activityRecord, level = null, replaceOpen = false) {
+    const skillCategory = activityRecord.definition.category || dashboardSkillCategory;
+    setDashboardSkillCategory(skillCategory);
     let attempt = (await api(`/api/skill-activities/${activityRecord.id}/open-attempt`)).attempt;
     if (level && attempt) {
       if (!replaceOpen) {
@@ -2208,12 +2608,17 @@ function PlatformApp() {
     const activityState = { attempt, definition: activityRecord.definition, activityId: activityRecord.id };
     setActiveActivity(activityState);
     setProject({ id: `skill-attempt-${attempt.id}`, owner_id: user.id, name: activityRecord.definition.title, document: prepared.changed ? prepared.document : attempt.workingDocument, assignment: { specification: activityRecord.definition.requirements.specification }, isSkillActivity: true });
-    localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'activity', activityId: activityRecord.id, attemptId: attempt.id, tab: 'skills' }));
+    localStorage.setItem(`packettracker-view-${user.id}`, JSON.stringify({ page: 'activity', activityId: activityRecord.id, attemptId: attempt.id, tab: 'skills', skillCategory }));
   }
 
   if (loading) return <div className="platform-loading"><div className="brand-mark"><img src="/packettrackerfavicon.png" alt=""/></div><span>Loading PacketTracker…</span></div>;
   if (!user) return <AuthScreen onAuthenticated={authenticatedUser => { setDashboardTab(authenticatedUser.role === 'student' ? 'projects' : 'classes'); setUser(authenticatedUser); }}/>;
   if (project) return <EditorApp key={project.id} project={project} user={user} activity={activeActivity} readOnly={project.owner_id !== user.id} onBack={() => { showDashboardTab(project.isSkillActivity ? 'skills' : project.isAssignmentPreview ? 'assignments' : 'projects'); setProject(null); setActiveActivity(null); setDashboardRevision(value => value + 1); }} onActivityReset={activeActivity ? async () => {
+    clearTerminalStates([
+      ...(activeActivity.definition.startingNetwork?.devices || []),
+      ...(activeActivity.attempt.workingDocument?.devices || []),
+      ...(project.document?.devices || [])
+    ]);
     await openSkillActivity({ id: activeActivity.activityId, definition: activeActivity.definition }, activeActivity.attempt.requestedLevel, true);
   } : null} onActivitySave={activeActivity ? async (document, updates = {}) => {
     const saved = await api(`/api/skill-attempts/${activeActivity.attempt.id}`, { method: 'PUT', body: JSON.stringify({ document, ...updates }) });
@@ -2238,7 +2643,7 @@ function PlatformApp() {
     const saved = await api(`/api/projects/${project.id}`, { method: 'PUT', body: JSON.stringify({ name: project.name, document }) });
     setProject(current => ({ ...current, ...saved }));
   } : null}/>;
-  return <><Dashboard key={dashboardRevision} user={user} initialTab={dashboardTab} onTabChange={showDashboardTab} onOpenProject={openProject} onOpenSkillActivity={openSkillActivity} onPreviewAssignment={openAssignmentPreview} onLogout={async () => { localStorage.removeItem(`packettracker-view-${user.id}`); await api('/api/auth/logout', { method: 'POST' }); setUser(null); }}/>
+  return <><Dashboard key={dashboardRevision} user={user} initialTab={dashboardTab} initialSkillCategory={dashboardSkillCategory} onTabChange={showDashboardTab} onSkillCategoryChange={showSkillCategory} onOpenProject={openProject} onOpenSkillActivity={openSkillActivity} onPreviewAssignment={openAssignmentPreview} onLogout={async () => { localStorage.removeItem(`packettracker-view-${user.id}`); await api('/api/auth/logout', { method: 'POST' }); setUser(null); }}/>
     {difficultyWarning && <DifficultyWarningModal
       currentLevel={difficultyWarning.currentLevel}
       nextLevel={difficultyWarning.level}
@@ -2384,24 +2789,45 @@ function TeacherClassCard({ course, students, expanded, onToggle, onPresentCode,
   </article>;
 }
 
-function SkillActivityCard({ item, progress, attempts, onStart }) {
+function SkillActivityCard({ item, progress, attempts, onStart, locked = false, prerequisite = null }) {
   const [expanded, setExpanded] = useState(false);
   const completedLevels = new Set((attempts || []).filter(attempt => attempt.status === 'completed').map(attempt => attempt.awardedLevel));
+  const independentComplete = completedLevels.has('independent') || progress?.highestLevel === 'independent';
   const openAttempt = (attempts || []).find(attempt => attempt.status === 'in_progress');
   const levelButton = level => {
     const completed = completedLevels.has(level);
-    return item.definition.supportedLevels.includes(level) && <button key={level} className={`button secondary skill-start-button ${completed ? 'completed' : ''}`} onClick={() => onStart(item, level)}>{completed ? `${levelLabel(level)} Completed` : `Start ${levelLabel(level)}`}</button>;
+    return item.definition.supportedLevels.includes(level) && <button key={level} disabled={locked} className={`button secondary skill-start-button ${completed ? 'completed' : ''}`} onClick={() => onStart(item, level)}>{completed ? `${levelLabel(level)} Completed` : `Start ${levelLabel(level)}`}</button>;
   };
-  return <article className={`skill-activity-card ${expanded ? 'expanded' : 'collapsed'}`}>
+  return <article className={`skill-activity-card ${expanded ? 'expanded' : 'collapsed'} ${locked ? 'locked' : ''} ${independentComplete ? 'independent-complete' : ''}`}>
     <button className="skill-card-toggle" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}><span>{expanded ? <ChevronDown size={18}/> : <ChevronRight size={18}/>}<strong>{item.definition.title}</strong></span></button>
-    <div className="skill-card-actions"><div className="skill-start-buttons">{openAttempt && <button className="button skill-resume-button" onClick={() => onStart(item)}>Resume {levelLabel(openAttempt.requestedLevel)}</button>}{levelButton('guided')}{levelButton('independent')}</div></div>
-    {expanded && <div className="skill-card-details"><span>{item.definition.category}</span><p>{item.definition.description}</p><div>{item.definition.skills.map(skill => <small key={skill}>{skill.replaceAll('-', ' ')}</small>)}</div>{(openAttempt || progress) && <footer>{openAttempt && <span className="skill-in-progress"><RotateCcw size={13}/>{levelLabel(openAttempt.requestedLevel)} in progress</span>}{progress && <span className={`skill-level-badge ${progress.highestLevel}`}><GraduationCap size={14}/>Highest proficiency: {levelLabel(progress.highestLevel)}</span>}</footer>}</div>}
+    <div className="skill-card-actions"><div className="skill-start-buttons">{locked ? <span className="skill-locked-label"><LockKeyhole size={14}/> Complete {prerequisite?.definition.title}</span> : <>{openAttempt && <button className={`button skill-resume-button ${openAttempt.requestedLevel === 'independent' ? 'independent' : ''}`} onClick={() => onStart(item)}>Resume {levelLabel(openAttempt.requestedLevel)}</button>}{levelButton('guided')}{levelButton('independent')}</>}</div></div>
+    {expanded && <div className="skill-card-details"><span>{item.definition.category}{item.definition.progressionOrder ? ` · Step ${item.definition.progressionOrder}` : ''}</span><p>{item.definition.description}</p>{locked && <p className="skill-lock-explanation"><LockKeyhole size={14}/> Complete “{prerequisite?.definition.title}” to unlock this skill.</p>}<div>{item.definition.skills.map(skill => <small key={skill}>{skill.replaceAll('-', ' ')}</small>)}</div>{(openAttempt || progress) && <footer>{openAttempt && <span className="skill-in-progress"><RotateCcw size={13}/>{levelLabel(openAttempt.requestedLevel)} in progress</span>}{progress && <span className={`skill-level-badge ${progress.highestLevel}`}><GraduationCap size={14}/>Highest proficiency: {levelLabel(progress.highestLevel)}</span>}</footer>}</div>}
   </article>;
 }
 
-function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, onOpenSkillActivity, onPreviewAssignment, onLogout }) {
+function SkillGridCard({ item, progress, attempts, onStart, locked = false }) {
+  const completedLevels = new Set((attempts || []).filter(attempt => attempt.status === 'completed').map(attempt => attempt.awardedLevel));
+  const independentComplete = completedLevels.has('independent') || progress?.highestLevel === 'independent';
+  const openAttempt = (attempts || []).find(attempt => attempt.status === 'in_progress');
+  const actionButton = level => {
+    if (!item.definition.supportedLevels.includes(level)) return null;
+    const completed = completedLevels.has(level);
+    const button = <button disabled={locked} className={`button secondary skill-start-button ${completed ? 'completed' : ''}`} onClick={() => onStart(item, level)}>{completed ? `${levelLabel(level)} completed` : `Start ${levelLabel(level)}`}</button>;
+    return locked ? <span key={level} className="locked-skill-action" data-tooltip="Beat previous skills to unlock">{button}</span> : React.cloneElement(button, { key: level });
+  };
+  return <article className={`skill-grid-card ${locked ? 'locked' : ''} ${independentComplete ? 'independent-complete' : ''}`}>
+    <header><span>{item.definition.progressionOrder ? `Challenge ${item.definition.progressionOrder}` : item.definition.category}</span>{progress ? <b><GraduationCap size={13}/> Completed</b> : locked ? <b className="locked"><LockKeyhole size={13}/> Locked</b> : <b className="available">Available</b>}</header>
+    <h3>{item.definition.title}</h3>
+    <p>{item.definition.description}</p>
+    <div className="skill-grid-tags">{item.definition.skills.slice(0, 3).map(skill => <small key={skill}>{skill.replaceAll('-', ' ')}</small>)}</div>
+    <footer>{!locked && openAttempt && <button className={`button skill-resume-button ${openAttempt.requestedLevel === 'independent' ? 'independent' : ''}`} onClick={() => onStart(item)}>Resume {levelLabel(openAttempt.requestedLevel)}</button>}{actionButton('guided')}{actionButton('independent')}</footer>
+  </article>;
+}
+
+function Dashboard({ user, initialTab = 'classes', initialSkillCategory = 'all', onTabChange, onSkillCategoryChange, onOpenProject, onOpenSkillActivity, onPreviewAssignment, onLogout }) {
   const [data, setData] = useState({ classes: [], classStudents: [], projects: [], sharedProjects: [], assignments: [], activities: [], skillProgress: [], skillTotals: null, activityAttempts: {} });
   const [loading, setLoading] = useState(true);
+  const [skillsLoading, setSkillsLoading] = useState(false);
   const [error, setError] = useState('');
   const [newClass, setNewClass] = useState('');
   const [joinCodeValue, setJoinCodeValue] = useState('');
@@ -2418,18 +2844,28 @@ function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, o
   const [selectedAssignmentClasses, setSelectedAssignmentClasses] = useState([]);
   const [assignmentPromptCopied, setAssignmentPromptCopied] = useState(false);
   const [expandedClasses, setExpandedClasses] = useState([]);
-  const [skillCategory, setSkillCategory] = useState('all');
+  const [skillCategory, setSkillCategory] = useState(initialSkillCategory);
   const classRosterInitializedRef = useRef(false);
+  const skillsRequestRef = useRef(null);
+
+  const loadSkills = async () => {
+    if (skillsRequestRef.current) return skillsRequestRef.current;
+    setSkillsLoading(true);
+    const request = Promise.all([api('/api/skill-activities'), api('/api/skill-progress'), api('/api/skill-attempts')])
+      .then(([library, progress, attempts]) => setData(current => ({ ...current, activities: library.activities || [], skillProgress: progress?.progress || [], skillTotals: progress?.totals || null, activityAttempts: attempts?.activityAttempts || {} })))
+      .catch(requestError => setError(requestError.message))
+      .finally(() => setSkillsLoading(false));
+    skillsRequestRef.current = request;
+    return request;
+  };
 
   const refresh = async () => {
     try {
-      const [dashboard, library, progress] = await Promise.all([api('/api/dashboard'), api('/api/skill-activities'), api('/api/skill-progress')]);
-      const activities = library.activities || [], activityAttempts = {};
-      await Promise.all(activities.map(async item => { activityAttempts[item.id] = (await api(`/api/skill-activities/${item.id}/attempts`)).attempts || []; }));
-      setData({ ...dashboard, activities, skillProgress: progress?.progress || [], skillTotals: progress?.totals || null, activityAttempts });
+      const dashboard = await api('/api/dashboard');
+      setData(current => ({ ...current, ...dashboard }));
       if (user.role === 'teacher' && !classRosterInitializedRef.current) { setExpandedClasses((dashboard.classes || []).map(course => course.id)); classRosterInitializedRef.current = true; }
     } catch (requestError) { setError(requestError.message); }
-    finally { setLoading(false); }
+    finally { setLoading(false); loadSkills(); }
   };
   useEffect(() => { refresh(); }, []);
   useEffect(() => {
@@ -2471,6 +2907,32 @@ function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, o
       setAssignmentJson(''); setAssignmentModalOpen(false); refresh();
     } catch (requestError) { setError(requestError instanceof SyntaxError ? `Invalid JSON: ${requestError.message}` : requestError.message); }
   }
+  async function loadAssignmentFile(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setError('');
+    try {
+      const contents = await file.text();
+      JSON.parse(contents);
+      setAssignmentJson(contents);
+    } catch (fileError) {
+      setAssignmentJson('');
+      setError(fileError instanceof SyntaxError ? `Invalid JSON in ${file.name}: ${fileError.message}` : `Could not read ${file.name}`);
+      event.target.value = '';
+    }
+  }
+  function exportAssignment(assignment) {
+    const safeTitle = String(assignment.title || 'assignment').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'assignment';
+    const blob = new Blob([`${JSON.stringify(assignment.specification, null, 2)}\n`], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${safeTitle}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
   async function startAssignment(assignment) {
     if (assignment.project_id) return onOpenProject(assignment.project_id);
     const project = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name: assignment.title, assignmentId: assignment.id }) });
@@ -2493,23 +2955,37 @@ function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, o
     <div className="project-list">{data.projects.map(item => <article key={item.id}><button className="project-open" onClick={() => onOpenProject(item.id)}><span className="project-icon"><Network size={18}/></span><span><strong>{item.name}</strong><small>Updated {new Date(item.updated_at).toLocaleString()}</small></span></button><div>{user.role === 'student' && data.classes.length > 0 && <button title="Share with teacher" onClick={() => shareProject(item.id, data.classes[0].id)}><Share2 size={14}/>{item.shared ? 'Shared' : 'Share'}</button>}<button className="danger-link" onClick={() => removeProject(item.id)}><Trash2 size={14}/></button></div></article>)}{!data.projects.length && <p>Create your first network project.</p>}</div>
   </section>;
   const sharedPanel = <section className="dashboard-panel shared-panel"><div className="dashboard-panel-title"><div><Share2 size={18}/><span><strong>Shared with me</strong><small>Student projects for review</small></span></div></div><div className="project-list">{data.sharedProjects.map(item => <article key={item.id}><button className="project-open" onClick={() => onOpenProject(item.id)}><span className="project-icon"><Network size={18}/></span><span><strong>{item.name}</strong><small>{item.owner_name}{item.class_name ? ` · ${item.class_name}` : ''}</small></span></button></article>)}{!data.sharedProjects.length && <p>No student projects have been shared yet.</p>}</div></section>;
-  const assignmentsPanel = <section className="dashboard-panel assignments-panel"><div className="dashboard-panel-title"><div><FilePlus2 size={18}/><span><strong>Assignments</strong><small>{data.assignments.length} available</small></span></div>{user.role === 'teacher' && <button className="panel-add-button" onClick={() => setAssignmentModalOpen(true)} aria-label="Create assignment" title="Create assignment from JSON"><Plus size={23}/></button>}</div>
-    <div className="assignment-list">{data.assignments.map(assignment => <article key={assignment.id}><div><span>{assignment.classNames?.length ? assignment.classNames.join(' · ') : user.role === 'teacher' ? 'Not assigned' : 'Assignment'}</span><strong>{assignment.title}</strong><p>{assignmentDescription(assignment.specification.scenario.description)}</p><small>{assignment.specification.roles.length} roles · {assignment.specification.relationships.length} reachability checks</small></div>{user.role === 'student' ? <button className="button primary" onClick={() => startAssignment(assignment)}>{assignment.project_id ? 'Open project' : 'Start assignment'}</button> : <div className="assignment-actions"><button className="button secondary" onClick={() => onPreviewAssignment(assignment)}>Open preview</button>{assignment.project_id && <button className="button secondary saved-example-button" onClick={() => onOpenProject(assignment.project_id)}>Open saved</button>}<button className="button primary" onClick={() => { setAssignmentClassTarget(assignment); setSelectedAssignmentClasses(assignment.classIds || []); }}>Assign to classes</button><small>{assignment.student_projects} student project{assignment.student_projects === 1 ? '' : 's'}</small></div>}</article>)}{!data.assignments.length && <p>{user.role === 'teacher' ? 'Create an assignment from JSON, test it privately, then assign it to one or more classes.' : 'Your teacher has not published any assignments yet.'}</p>}</div>
+  const assignmentsPanel = <section className="dashboard-panel assignments-panel"><div className="dashboard-panel-title"><div><FilePlus2 size={18}/><span><strong>Assignments</strong><small>{data.assignments.length} available</small></span></div>{user.role === 'teacher' && <button className="panel-add-button" onClick={() => setAssignmentModalOpen(true)} aria-label="Create assignment" title="Create or import an assignment"><Plus size={23}/></button>}</div>
+    <div className="assignment-list">{data.assignments.map(assignment => <article key={assignment.id}><div><span>{assignment.classNames?.length ? assignment.classNames.join(' · ') : user.role === 'teacher' ? 'Not assigned' : 'Assignment'}</span><strong>{assignment.title}</strong><p>{assignmentDescription(assignment.specification.scenario.description)}</p><small>{assignment.specification.roles.length} roles · {assignment.specification.relationships.length} reachability checks</small></div>{user.role === 'student' ? <button className="button primary" onClick={() => startAssignment(assignment)}>{assignment.project_id ? 'Open project' : 'Start assignment'}</button> : <div className="assignment-actions"><button className="button secondary" onClick={() => exportAssignment(assignment)} title="Download assignment JSON"><Download size={14}/> Export JSON</button><button className="button secondary" onClick={() => onPreviewAssignment(assignment)}>Open preview</button>{assignment.project_id && <button className="button secondary saved-example-button" onClick={() => onOpenProject(assignment.project_id)}>Open saved</button>}<button className="button primary" onClick={() => { setAssignmentClassTarget(assignment); setSelectedAssignmentClasses(assignment.classIds || []); }}>Assign to classes</button><small>{assignment.student_projects} student project{assignment.student_projects === 1 ? '' : 's'}</small></div>}</article>)}{!data.assignments.length && <p>{user.role === 'teacher' ? 'Create an assignment from JSON, test it privately, then assign it to one or more classes.' : 'Your teacher has not published any assignments yet.'}</p>}</div>
   </section>;
-  const skillCategories = [...new Set(data.activities.map(item => item.definition.category))].sort();
+  const skillCategoryOrder = ['End Devices', 'Switches', 'Routers', 'Security'];
+  const orderedActivities = [...data.activities].sort((left, right) => {
+    const leftCategory = skillCategoryOrder.indexOf(left.definition.category), rightCategory = skillCategoryOrder.indexOf(right.definition.category);
+    const categoryDifference = (leftCategory < 0 ? 999 : leftCategory) - (rightCategory < 0 ? 999 : rightCategory) || left.definition.category.localeCompare(right.definition.category);
+    return categoryDifference || (left.definition.progressionOrder || 999) - (right.definition.progressionOrder || 999) || left.definition.title.localeCompare(right.definition.title);
+  });
+  const skillCategories = [...new Set(orderedActivities.map(item => item.definition.category))];
   const completedActivityIds = new Set(data.skillProgress.map(item => item.activityId));
-  const incompleteActivities = data.activities.filter(item => !completedActivityIds.has(item.id));
-  const visibleActivities = skillCategory === 'incomplete' ? incompleteActivities : skillCategory === 'all' ? data.activities : data.activities.filter(item => item.definition.category === skillCategory);
-  const visibleSkillCategories = [...new Set(visibleActivities.map(item => item.definition.category))].sort();
   const totals = data.skillTotals || { total: data.activities.length, completed: 0, guided: 0, assisted: 0, independent: 0, incomplete: data.activities.length };
-  const skillsPanel = <section className="dashboard-panel skills-panel"><div className="dashboard-panel-title skills-library-header"><div><GraduationCap size={18}/><span><strong>Skills Library</strong><small>{totals.completed} of {totals.total} skills completed</small></span></div><div className="skill-library-progress" title={`${totals.guided} guided · ${totals.assisted} hinted · ${totals.independent} independent · ${totals.incomplete} incomplete`} aria-label={`${totals.guided} guided, ${totals.assisted} hinted, ${totals.independent} independent, ${totals.incomplete} incomplete`}>{totals.total ? <>{totals.guided > 0 && <i className="guided" style={{ flex: totals.guided }}/>} {totals.assisted > 0 && <i className="assisted" style={{ flex: totals.assisted }}/>} {totals.independent > 0 && <i className="independent" style={{ flex: totals.independent }}/>} {totals.incomplete > 0 && <i className="incomplete" style={{ flex: totals.incomplete }}/>}</> : <i className="incomplete" style={{ flex: 1 }}/>}</div></div>
-    <nav className="skill-category-filters" aria-label="Skill categories"><button className={skillCategory === 'all' ? 'active' : ''} onClick={() => setSkillCategory('all')}>All skills <small>{data.activities.length}</small></button><button className={skillCategory === 'incomplete' ? 'active incomplete-filter' : 'incomplete-filter'} onClick={() => setSkillCategory('incomplete')}>Incomplete <small>{incompleteActivities.length}</small></button>{skillCategories.map(category => <button key={category} className={skillCategory === category ? 'active' : ''} onClick={() => setSkillCategory(category)}>{category}<small>{data.activities.filter(item => item.definition.category === category).length}</small></button>)}</nav>
-    <div className="skill-activity-list">{visibleSkillCategories.map(category => { const categoryActivities = visibleActivities.filter(item => item.definition.category === category); return <React.Fragment key={category}><div className="skill-category-heading"><strong>{category}</strong><span>{categoryActivities.length} skill{categoryActivities.length === 1 ? '' : 's'}</span></div>{categoryActivities.map(item => <SkillActivityCard key={item.id} item={item} progress={data.skillProgress.find(entry => entry.activityId === item.id)} attempts={data.activityAttempts[item.id] || []} onStart={onOpenSkillActivity}/>)}</React.Fragment>; })}{!visibleActivities.length && <p>{skillCategory === 'incomplete' ? 'You have completed every available skill.' : 'No skill activities are available in this category.'}</p>}</div>
+  const activeSkillCategory = skillCategories.includes(skillCategory) ? skillCategory : skillCategories[0];
+  const activeCategoryActivities = orderedActivities.filter(item => item.definition.category === activeSkillCategory);
+  const activeIncompleteActivities = activeCategoryActivities.filter(item => !completedActivityIds.has(item.id));
+  const activeCompletedActivities = activeCategoryActivities.filter(item => completedActivityIds.has(item.id));
+  const nextBuiltInActivity = activeCategoryActivities.find(item => item.origin === 'built_in' && Number.isInteger(item.definition.progressionOrder) && !completedActivityIds.has(item.id)) || null;
+  const skillCard = (item, locked = false) => <SkillGridCard key={item.id} item={item} progress={data.skillProgress.find(entry => entry.activityId === item.id)} attempts={data.activityAttempts[item.id] || []} onStart={onOpenSkillActivity} locked={locked}/>;
+  const skillsPanel = <section className="dashboard-panel skills-panel">
+    {skillsLoading && !data.activities.length ? <div className="dashboard-loading skills-loading">Loading skills…</div> : <div className="skill-browser">
+      <nav className="skill-category-menu" aria-label="Skill categories"><div className="skill-overall-progress"><span><strong>Overall</strong><small>{totals.completed} of {totals.total}</small></span><div className="skill-library-progress" title={`${totals.guided} guided · ${totals.assisted} hinted · ${totals.independent} independent · ${totals.incomplete} incomplete`} aria-label={`${totals.guided} guided, ${totals.assisted} hinted, ${totals.independent} independent, ${totals.incomplete} incomplete`}>{totals.total ? <>{totals.guided > 0 && <i className="guided" style={{ flex: totals.guided }}/>} {totals.assisted > 0 && <i className="assisted" style={{ flex: totals.assisted }}/>} {totals.independent > 0 && <i className="independent" style={{ flex: totals.independent }}/>} {totals.incomplete > 0 && <i className="incomplete" style={{ flex: totals.incomplete }}/>}</> : <i className="incomplete" style={{ flex: 1 }}/>}</div></div>{skillCategories.map(category => { const categoryActivities = orderedActivities.filter(item => item.definition.category === category), completed = categoryActivities.filter(item => completedActivityIds.has(item.id)).length, percent = categoryActivities.length ? completed / categoryActivities.length * 100 : 0; return <button key={category} className={activeSkillCategory === category ? 'active' : ''} onClick={() => { setSkillCategory(category); onSkillCategoryChange?.(category); }}><span><strong>{category}</strong><small>{completed} of {categoryActivities.length}</small></span><i><b style={{ width: `${percent}%` }}/></i></button>; })}</nav>
+      <section className="skill-grid-panel"><header><div><span>Skill path</span><h2>{activeSkillCategory || 'Skills'}</h2></div><strong>{activeCompletedActivities.length} / {activeCategoryActivities.length} completed</strong></header>
+        <div className="skill-challenge-grid">{activeIncompleteActivities.map(item => { const isProgressionSkill = item.origin === 'built_in' && Number.isInteger(item.definition.progressionOrder), locked = user.role === 'student' && isProgressionSkill && item.id !== nextBuiltInActivity?.id; return skillCard(item, locked); })}{!activeIncompleteActivities.length && <p className="skill-path-complete">Every challenge in this path is complete.</p>}</div>
+        {!!activeCompletedActivities.length && <details className="completed-skill-challenges"><summary><span><i>✓</i><strong>Completed challenges</strong></span><b>{activeCompletedActivities.length} completed</b><ChevronDown size={18}/></summary><div className="skill-challenge-grid">{activeCompletedActivities.map(item => skillCard(item))}</div></details>}
+      </section>
+    </div>}
   </section>;
   const dashboardPanels = { classes: classesPanel, projects: projectsPanel, shared: sharedPanel, assignments: assignmentsPanel, skills: skillsPanel };
-  const selectDashboardTab = tab => { setTeacherTab(tab); onTabChange?.(tab); };
+  const selectDashboardTab = tab => { setTeacherTab(tab); onTabChange?.(tab); if (tab === 'skills') loadSkills(); };
 
-  return <div className={`dashboard-shell ${user.role === 'teacher' ? 'teacher-dashboard' : 'student-dashboard'}`}><NetworkConstellationBackground/><header className="dashboard-topbar"><div className="brand"><div className="brand-mark"><img src="/packettrackerfavicon.png" alt=""/></div><span>Packet<span>Tracker</span></span></div><div><span>{user.name}</span><small>{user.role}</small><button className="icon-button" title="Sign out" onClick={onLogout}><LogOut size={17}/></button></div></header>
+  return <div className={`dashboard-shell ${user.role === 'teacher' ? 'teacher-dashboard' : 'student-dashboard'}`}><NetworkConstellationBackground/><header className="dashboard-topbar"><img className="dashboard-brand-logo" src="/packettracker-logo-with-text.png" alt="PacketTracker"/><div><span>{user.name}</span><small>{user.role}</small><button className="icon-button" title="Sign out" onClick={onLogout}><LogOut size={17}/></button></div></header>
     <main className="dashboard-main"><section className="dashboard-welcome"><h1>{user.role === 'teacher' ? 'Teacher Dashboard' : 'Student Dashboard'}</h1></section>
       {error && <div className="form-error">{error}</div>}{loading ? <div className="dashboard-loading">Loading your workspace…</div> : <div className="teacher-workspace">
         <nav className="teacher-tabs" aria-label={`${user.role === 'teacher' ? 'Teacher' : 'Student'} workspace sections`}>
@@ -2540,7 +3016,7 @@ function Dashboard({ user, initialTab = 'classes', onTabChange, onOpenProject, o
     {assignmentModalOpen && <div className="class-modal-backdrop" onPointerDown={() => setAssignmentModalOpen(false)}>
       <section className="class-create-modal assignment-import-modal" role="dialog" aria-modal="true" aria-labelledby="assignment-import-title" onPointerDown={event => event.stopPropagation()}>
         <header><div><span>Assignment JSON</span><h2 id="assignment-import-title">Create assignment</h2></div><div className="assignment-modal-tools"><button className="copy-prompt-button" onClick={async () => { await navigator.clipboard.writeText(ASSIGNMENT_AI_PROMPT); setAssignmentPromptCopied(true); setTimeout(() => setAssignmentPromptCopied(false), 1800); }} title="Copy the AI assignment interview prompt" aria-label="Copy AI prompt"><Copy size={17}/></button><button className="icon-button" onClick={() => setAssignmentModalOpen(false)} aria-label="Close"><X size={17}/></button></div></header>
-        {assignmentPromptCopied && <div className="prompt-copied">AI interview prompt copied</div>}<form onSubmit={importAssignment}><p className="assignment-import-help">Use the copy button above with an AI assistant, then paste the JSON it gives you below. Creating an assignment does not publish it to students.</p><label htmlFor="assignment-json">Paste assignment JSON</label><textarea id="assignment-json" autoFocus required value={assignmentJson} onChange={event => setAssignmentJson(event.target.value)} placeholder="Paste the JSON from your AI assistant here"/><div><button type="button" className="button secondary" onClick={() => setAssignmentModalOpen(false)}>Cancel</button><button className="button primary">Create assignment</button></div></form>
+        {assignmentPromptCopied && <div className="prompt-copied">AI interview prompt copied</div>}<form onSubmit={importAssignment}><p className="assignment-import-help">Import an exported assignment file, or use the copy button above with an AI assistant and paste the JSON it gives you. Creating an assignment does not publish it to students.</p><label htmlFor="assignment-json-file">Import JSON file</label><input id="assignment-json-file" type="file" accept="application/json,.json" onChange={loadAssignmentFile}/><div className="assignment-import-divider"><span>or paste JSON</span></div><label htmlFor="assignment-json">Assignment JSON</label><textarea id="assignment-json" required value={assignmentJson} onChange={event => setAssignmentJson(event.target.value)} placeholder="Paste assignment JSON here"/><div><button type="button" className="button secondary" onClick={() => setAssignmentModalOpen(false)}>Cancel</button><button className="button primary">Create assignment</button></div></form>
       </section>
     </div>}
     {assignmentClassTarget && <div className="class-modal-backdrop" onPointerDown={() => setAssignmentClassTarget(null)}><section className="class-create-modal assignment-class-modal" role="dialog" aria-modal="true" aria-labelledby="assignment-class-title" onPointerDown={event => event.stopPropagation()}><header><div><span>Publish assignment</span><h2 id="assignment-class-title">Assign “{assignmentClassTarget.title}”</h2></div><button className="icon-button" onClick={() => setAssignmentClassTarget(null)}><X size={17}/></button></header><form onSubmit={assignToClasses}><p>Select every class that should receive this assignment. Clearing all selections returns it to private draft status.</p><div className="assignment-class-options">{data.classes.map(course => <label key={course.id}><input type="checkbox" checked={selectedAssignmentClasses.includes(course.id)} onChange={event => setSelectedAssignmentClasses(current => event.target.checked ? [...current, course.id] : current.filter(id => id !== course.id))}/><span><strong>{course.name}</strong><small>{course.student_count} students</small></span></label>)}{!data.classes.length && <p>Create a class before publishing assignments.</p>}</div><div><button type="button" className="button secondary" onClick={() => setAssignmentClassTarget(null)}>Cancel</button><button className="button primary">Save class assignments</button></div></form></section></div>}

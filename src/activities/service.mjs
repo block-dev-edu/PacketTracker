@@ -105,6 +105,11 @@ export function createActivityService(db) {
     if (existing) {
       if (definition.definitionVersion < existing.definition_version) fail(409, 'A built-in activity cannot be replaced by an older version');
       db.prepare('UPDATE skill_activities SET definition=?,status=?,visibility=?,definition_version=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(stringify(definition), definition.status, definition.visibility, definition.definitionVersion, existing.id);
+      if (origin === 'built_in') {
+        const definitionSnapshot = stringify(definition);
+        db.prepare("UPDATE skill_activity_attempts SET activity_version=?,definition_snapshot=?,evaluation_result=NULL,updated_at=CURRENT_TIMESTAMP WHERE activity_id=? AND status='in_progress' AND (activity_version<? OR definition_snapshot<>?)")
+          .run(definition.definitionVersion, definitionSnapshot, existing.id, definition.definitionVersion, definitionSnapshot);
+      }
       return activityRecord(rawActivity(existing.id));
     }
     const result = db.prepare('INSERT INTO skill_activities (activity_key,origin,owner_id,definition,status,visibility,definition_version) VALUES (?,?,?,?,?,?,?)').run(definition.key, origin, ownerId, stringify(definition), definition.status, definition.visibility, definition.definitionVersion);
@@ -159,6 +164,13 @@ export function createActivityService(db) {
       if (!['student', 'teacher'].includes(actor?.role)) fail(403, 'A student or teacher account is required to start a skill activity');
       const activity = requireReadable(actor, activityId), definition = parse(activity.definition);
       if (!definition.supportedLevels.includes(requestedLevel)) fail(400, 'That proficiency level is not available for this activity');
+      if (actor.role === 'student' && activity.origin === 'built_in' && Number.isInteger(definition.progressionOrder) && definition.progressionOrder > 1) {
+        const previous = db.prepare("SELECT * FROM skill_activities WHERE origin='built_in' AND status='published' AND visibility='global'").all()
+          .map(row => ({ row, definition: parse(row.definition) }))
+          .filter(item => item.definition.category === definition.category && Number.isInteger(item.definition.progressionOrder) && item.definition.progressionOrder < definition.progressionOrder)
+          .sort((left, right) => right.definition.progressionOrder - left.definition.progressionOrder)[0];
+        if (previous && !db.prepare("SELECT 1 FROM skill_activity_attempts WHERE activity_id=? AND student_id=? AND status='completed' LIMIT 1").get(previous.row.id, actor.id)) fail(409, `Complete “${previous.definition.title}” before starting this skill`);
+      }
       const result = db.prepare('INSERT INTO skill_activity_attempts (activity_id,student_id,activity_version,definition_snapshot,requested_level,working_document) VALUES (?,?,?,?,?,?)').run(activity.id, actor.id, activity.definition_version, activity.definition, requestedLevel, stringify(definition.startingNetwork));
       return attemptRecord(db.prepare('SELECT * FROM skill_activity_attempts WHERE id=?').get(result.lastInsertRowid));
     },
@@ -173,6 +185,14 @@ export function createActivityService(db) {
       if (!['student', 'teacher'].includes(actor?.role)) fail(403, 'A student or teacher account is required to resume a skill activity');
       requireReadable(actor, activityId);
       return attemptRecord(db.prepare("SELECT * FROM skill_activity_attempts WHERE activity_id=? AND student_id=? AND status='in_progress' ORDER BY updated_at DESC LIMIT 1").get(activityId, actor.id));
+    },
+    ownAttemptHistory(actor) {
+      if (!['student', 'teacher'].includes(actor?.role)) fail(403, 'A student or teacher account is required to view skill attempts');
+      const grouped = {};
+      for (const row of db.prepare('SELECT * FROM skill_activity_attempts WHERE student_id=? ORDER BY started_at DESC,id DESC').all(actor.id)) {
+        (grouped[row.activity_id] ||= []).push(attemptRecord(row));
+      }
+      return grouped;
     },
     saveAttempt(actor, attemptId, updates) {
       const row = db.prepare('SELECT * FROM skill_activity_attempts WHERE id=? AND student_id=?').get(attemptId, actor?.id);

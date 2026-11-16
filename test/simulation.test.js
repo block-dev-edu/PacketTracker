@@ -6,7 +6,7 @@ import { createNgfwCliSession, executeNgfwCommand } from '../src/simulation/ngfw
 import { createRouterCliSession, executeRouterCommand } from '../src/simulation/routerCli.js';
 import { createFirewallCliSession, executeFirewallCommand } from '../src/simulation/firewallPolicyCli.js';
 import { findDuplicateIpConflicts, validateConnection, validateConnections } from '../src/simulation/connectionValidation.js';
-import { runPing } from '../src/simulation/ping.js';
+import { broadcastRecipients, createTopologySimulation, runPing } from '../src/simulation/ping.js';
 
 test('router ports have the required labels, counts, and modes', () => {
   const simulation = new NetworkSimulation();
@@ -35,6 +35,26 @@ test('an access point bridges its Ethernet uplink to a laptop Wi-Fi interface', 
   simulation.connect('laptop', 'wifi', 'ap', 'wifi');
   simulation.connect('wired', 'eth0', 'ap', 'eth0');
   assert.ok(simulation.domainFor('laptop', 'wifi').includes('wired:eth0'));
+});
+
+test('broadcast visualization follows the Layer 2 domain and stops at a router', () => {
+  const devices = [
+    { id: 'pc', instanceId: 'source' },
+    { id: 'pc', instanceId: 'peer' },
+    { id: 'switch-basic', instanceId: 'access' },
+    { id: 'router-basic', instanceId: 'router' },
+    { id: 'switch-basic', instanceId: 'remote-switch' },
+    { id: 'pc', instanceId: 'remote-peer' }
+  ];
+  const connections = [
+    { a: { deviceId: 'source', portId: 'eth0' }, b: { deviceId: 'access', portId: 'eth0' } },
+    { a: { deviceId: 'peer', portId: 'eth0' }, b: { deviceId: 'access', portId: 'eth1' } },
+    { a: { deviceId: 'router', portId: 'eth0' }, b: { deviceId: 'access', portId: 'eth2' } },
+    { a: { deviceId: 'router', portId: 'eth1' }, b: { deviceId: 'remote-switch', portId: 'eth0' } },
+    { a: { deviceId: 'remote-peer', portId: 'eth0' }, b: { deviceId: 'remote-switch', portId: 'eth1' } }
+  ];
+  assert.deepEqual(broadcastRecipients(devices, connections, 'source').sort(), ['access', 'peer', 'router']);
+  assert.deepEqual(broadcastRecipients(devices, connections, 'access'), [], 'a switch is not an originating end device');
 });
 
 test('device ping reports realistic success and failure output from the saved topology', () => {
@@ -215,6 +235,33 @@ test('managed switch CLI creates VLANs and assigns access ports', () => {
   assert.ok(show.output.some(line => line.includes('Students') && line.includes('Ethernet 1')));
 });
 
+test('managed switch port security permits the authorized MAC and rejects another device on the same port', () => {
+  const simulation = new NetworkSimulation();
+  const managed = simulation.addDevice('secure-switch', 'switch-managed');
+  const authorized = simulation.addDevice('authorized', 'pc'); authorized.macAddress = '02:00:00:00:00:10';
+  const unauthorized = simulation.addDevice('unauthorized', 'pc'); unauthorized.macAddress = '02:00:00:00:00:99';
+  let session = createSwitchCliSession();
+  for (const command of ['enable', 'conf t', 'interface ethernet 1', 'switchport mode access', 'switchport port-security', 'switchport port-security maximum 1', 'switchport port-security mac-address 02:00:00:00:00:10', 'switchport port-security violation restrict']) {
+    const result = executeSwitchCommand(session, managed.switching, command); session = result.session; managed.switching = result.switching;
+  }
+  assert.equal(simulation.portSecurityAllows(managed, 'eth0', authorized), true);
+  assert.equal(simulation.portSecurityAllows(managed, 'eth0', unauthorized), false);
+});
+
+test('advanced router CLI adds, displays, and removes static and default routes', () => {
+  const simulation = new NetworkSimulation();
+  const router = simulation.addDevice('route-cli', 'router-advanced');
+  router.interfaces.eth0 = { address: '10.0.0.1', prefix: 30 };
+  let session = createRouterCliSession();
+  for (const command of ['enable', 'conf t', 'ip route 192.168.20.0 255.255.255.0 10.0.0.2', 'ip route 0.0.0.0 0.0.0.0 10.0.0.2', 'end']) {
+    const result = executeRouterCommand(session, router.routerConfig, router.interfaces, command); session = result.session; router.routerConfig = result.config;
+  }
+  assert.deepEqual(router.routerConfig.routes, [{ network: '192.168.20.0', prefix: 24, nextHop: '10.0.0.2' }, { network: '0.0.0.0', prefix: 0, nextHop: '10.0.0.2' }]);
+  assert.ok(executeRouterCommand(session, router.routerConfig, router.interfaces, 'show ip route').output.some(line => line.includes('0.0.0.0/0')));
+  let result = executeRouterCommand({ mode: 'config', interfaceId: null }, router.routerConfig, router.interfaces, 'no ip route 192.168.20.0 255.255.255.0');
+  assert.deepEqual(result.config.routes, [{ network: '0.0.0.0', prefix: 0, nextHop: '10.0.0.2' }]);
+});
+
 test('successful configuration and save commands are silent in every CLI', () => {
   const simulation = new NetworkSimulation();
   const managed = simulation.addDevice('silent-switch', 'switch-managed');
@@ -337,6 +384,28 @@ test('firewall policy CLI configures source and destination IPv4 networks', () =
   assert.ok(help.some(line => line.startsWith('destination-address')));
 });
 
+test('firewall policies configure and enforce numeric TCP and UDP ports', () => {
+  let session = createFirewallCliSession(), configured = { mode: 'stateful', policies: [] };
+  for (const command of ['enable', 'conf t', 'policy 10', 'source-zone inside', 'destination-zone outside', 'protocol tcp', 'destination-port 443', 'action allow']) {
+    const result = executeFirewallCommand(session, configured, command); session = result.session; configured = result.firewall;
+    assert.deepEqual(result.output, []);
+  }
+  assert.equal(configured.policies[0].destinationPort, 443);
+  assert.ok(executeFirewallCommand(session, configured, 'destination-port 70000').output.some(line => line.includes('1 to 65535')));
+
+  const simulation = new NetworkSimulation();
+  const firewall = simulation.addDevice('port-firewall', 'firewall-stateful');
+  simulation.addDevice('port-client', 'pc'); simulation.addDevice('port-server', 'server');
+  simulation.configureInterface('port-firewall', 'inside', '10.2.1.1', 24); simulation.configureInterface('port-firewall', 'outside', '10.2.2.1', 24);
+  simulation.configureInterface('port-client', 'eth0', '10.2.1.10', 24); simulation.configureInterface('port-server', 'eth0', '10.2.2.10', 24);
+  simulation.setGateway('port-client', '10.2.1.1'); simulation.setGateway('port-server', '10.2.2.1');
+  simulation.connect('port-client', 'eth0', 'port-firewall', 'inside'); simulation.connect('port-server', 'eth0', 'port-firewall', 'outside');
+  firewall.firewall.policies = [...configured.policies, { sequence: 10000, sourceZone: 'any', destinationZone: 'any', protocol: 'any', action: 'deny' }];
+  assert.equal(simulation.simulatePacket({ sourceDevice: 'port-client', destinationIp: '10.2.2.10', protocol: 'tcp', sourcePort: 49152, destinationPort: 443 }).delivered, true);
+  assert.equal(simulation.simulatePacket({ sourceDevice: 'port-client', destinationIp: '10.2.2.10', protocol: 'tcp', sourcePort: 49152, destinationPort: 80 }).reason, 'Blocked by firewall');
+  assert.equal(simulation.simulatePacket({ sourceDevice: 'port-client', destinationIp: '10.2.2.10', protocol: 'udp', sourcePort: 49152, destinationPort: 443 }).reason, 'Blocked by firewall');
+});
+
 test('managed switch CLI configures explicit 802.1Q trunk encapsulation', () => {
   const simulation = new NetworkSimulation();
   const managed = simulation.addDevice('switch', 'switch-managed');
@@ -434,7 +503,7 @@ test('NGFW CLI creates a routed VLAN subinterface and managed switch trunk carri
   simulation.configureSwitchPort('switch', 'eth2', { mode: 'access', accessVlan: 20 });
 
   let session = createNgfwCliSession();
-  for (const command of ['enable', 'conf t', 'interface dmz.10', 'encapsulation dot1Q 10', 'ip address 172.16.10.1/24', 'zone dmz', 'exit', 'interface dmz.20', 'encapsulation dot1Q 20', 'ip address 172.16.20.1/24', 'zone users', 'end']) {
+  for (const command of ['enable', 'conf t', 'interface dmz', 'mode trunk', 'exit', 'interface dmz.10', 'encapsulation dot1Q 10', 'ip address 172.16.10.1/24', 'zone dmz', 'exit', 'interface dmz.20', 'encapsulation dot1Q 20', 'ip address 172.16.20.1/24', 'zone users', 'end']) {
     const result = executeNgfwCommand(session, firewall.ngfw, firewall.interfaces, command);
     session = result.session; firewall.ngfw = result.config; firewall.interfaces = result.interfaces;
   }
@@ -480,7 +549,7 @@ test('NGFW subinterface help only lists commands valid on a VLAN subinterface', 
   let session = createNgfwCliSession();
   let config = structuredClone(new NetworkSimulation().addDevice('firewall', 'firewall-ngfw').ngfw);
   let interfaces = {};
-  for (const command of ['enable', 'conf t', 'interface inside.10']) {
+  for (const command of ['enable', 'conf t', 'interface inside', 'mode trunk', 'exit', 'interface inside.10']) {
     const result = executeNgfwCommand(session, config, interfaces, command);
     session = result.session; config = result.config; interfaces = result.interfaces;
   }
@@ -498,9 +567,33 @@ test('NGFW CLI configures ordered zone security policies', () => {
     session = result.session; device.ngfw = result.config; device.interfaces = result.interfaces; firewall = result.firewall;
     assert.deepEqual(result.output, [], `NGFW policy command should be silent: ${command}`);
   }
-  assert.deepEqual(firewall.policies, [{ sequence: 10, sourceZone: 'guests', destinationZone: 'administration', sourceAddress: 'any', destinationAddress: 'any', protocol: 'icmp', action: 'deny' }]);
+  assert.deepEqual(firewall.policies, [{ sequence: 10, sourceZone: 'guests', destinationZone: 'administration', sourceAddress: 'any', destinationAddress: 'any', protocol: 'icmp', sourcePort: 'any', destinationPort: 'any', action: 'deny' }]);
   const shown = executeNgfwCommand(session, device.ngfw, device.interfaces, 'show policies', firewall);
   assert.ok(shown.output.some(line => line.includes('guests') && line.includes('administration') && line.includes('deny')));
+});
+
+test('NGFW preserves zone capitalization and matches policy zones case-insensitively', () => {
+  const devices = [
+    { id: 'firewall-ngfw', instanceId: 'fw', interfaces: { inside: { address: '10.10.0.1', prefix: 24 }, outside: { address: '203.0.113.2', prefix: 24 } }, ngfw: { ports: { outside: { mode: 'routed', enabled: true, zone: 'Outside', allowedVlans: [] }, inside: { mode: 'routed', enabled: true, zone: 'Teachers', allowedVlans: [] } }, subinterfaces: {} }, firewall: { mode: 'stateful', policies: [{ sequence: 10, sourceZone: 'teachers', destinationZone: 'OUTSIDE', protocol: 'icmp', action: 'deny' }] } },
+    { id: 'pc', instanceId: 'pc', interfaces: { eth0: { address: '10.10.0.10', prefix: 24 } }, gateway: '10.10.0.1' },
+    { id: 'pc', instanceId: 'internet-pc', interfaces: { eth0: { address: '203.0.113.10', prefix: 24 } }, gateway: '203.0.113.2' }
+  ];
+  const links = [
+    { id: 'pc-fw', a: { deviceId: 'pc', portId: 'eth0' }, b: { deviceId: 'fw', portId: 'inside' } },
+    { id: 'fw-internet', a: { deviceId: 'fw', portId: 'outside' }, b: { deviceId: 'internet-pc', portId: 'eth0' } }
+  ];
+  const simulation = createTopologySimulation(devices, links);
+  const result = simulation.simulatePacket({ sourceDevice: 'pc', destinationIp: '203.0.113.10', protocol: 'icmp' });
+  assert.equal(result.delivered, false);
+  assert.equal(result.reason, 'Blocked by firewall');
+
+  let session = createNgfwCliSession(), config = devices[0].ngfw, interfaces = devices[0].interfaces, firewall = devices[0].firewall;
+  for (const command of ['enable', 'configure terminal', 'policy 20', 'source-zone Teachers', 'destination-zone Students', 'action allow']) {
+    const next = executeNgfwCommand(session, config, interfaces, command, firewall);
+    session = next.session; config = next.config; interfaces = next.interfaces; firewall = next.firewall;
+  }
+  assert.equal(firewall.policies.find(policy => policy.sequence === 20).sourceZone, 'Teachers');
+  assert.equal(firewall.policies.find(policy => policy.sequence === 20).destinationZone, 'Students');
 });
 
 test('NGFW displays policies directly from global configuration mode', () => {
@@ -525,6 +618,19 @@ test('NGFW requires explicit VLAN subinterface configuration', () => {
   const shortcut = executeNgfwCommand(session, firewall.ngfw, firewall.interfaces, 'add vlan 10 ip 10.1.10.1/24 zone admin');
   assert.match(shortcut.output.join('\n'), /Unknown interface command/);
   assert.equal(firewall.ngfw.subinterfaces['inside.10'], undefined);
+});
+
+test('NGFW requires trunk mode before a VLAN subinterface can be created', () => {
+  const firewall = new NetworkSimulation().addDevice('firewall', 'firewall-ngfw');
+  let session = createNgfwCliSession();
+  for (const command of ['enable', 'conf t']) {
+    const result = executeNgfwCommand(session, firewall.ngfw, firewall.interfaces, command);
+    session = result.session; firewall.ngfw = result.config; firewall.interfaces = result.interfaces;
+  }
+  const rejected = executeNgfwCommand(session, firewall.ngfw, firewall.interfaces, 'interface inside.10');
+  assert.match(rejected.output.join('\n'), /inside must be configured with "mode trunk"/);
+  assert.equal(rejected.session.mode, 'config');
+  assert.equal(rejected.config.subinterfaces['inside.10'], undefined);
 });
 
 function routedFixture(routerType, [leftPort, rightPort]) {
@@ -659,7 +765,7 @@ test('ASA-style NGFW subinterfaces require an explicit vlan command', () => {
   const simulation = new NetworkSimulation();
   const firewall = simulation.addDevice('firewall', 'firewall-ngfw');
   let session = createNgfwCliSession();
-  for (const command of ['enable', 'conf t', 'interface inside.10']) {
+  for (const command of ['enable', 'conf t', 'interface inside', 'mode trunk', 'exit', 'interface inside.10']) {
     const result = executeNgfwCommand(session, firewall.ngfw, firewall.interfaces, command);
     session = result.session; firewall.ngfw = result.config; firewall.interfaces = result.interfaces;
   }
@@ -676,7 +782,7 @@ test('vendor-neutral NGFW accepts explicit encapsulation dot1Q syntax', () => {
   const simulation = new NetworkSimulation();
   const firewall = simulation.addDevice('firewall', 'firewall-ngfw');
   let session = createNgfwCliSession();
-  for (const command of ['enable', 'conf t', 'interface inside.20', 'encapsulation dot1Q 20']) {
+  for (const command of ['enable', 'conf t', 'interface inside', 'mode trunk', 'exit', 'interface inside.20', 'encapsulation dot1Q 20']) {
     const result = executeNgfwCommand(session, firewall.ngfw, firewall.interfaces, command);
     session = result.session; firewall.ngfw = result.config; firewall.interfaces = result.interfaces;
   }

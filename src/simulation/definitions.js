@@ -38,7 +38,7 @@ export const DEVICE_DEFINITIONS = {
       routerConfig: {
         hostname: 'Router',
         ports: Object.fromEntries(Array.from({ length: 4 }, (_, index) => [`eth${index}`, { mode: 'routed', enabled: true, allowedVlans: [] }])),
-        subinterfaces: {}
+        subinterfaces: {}, routes: []
       }
     }
   },

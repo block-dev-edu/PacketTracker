@@ -63,6 +63,7 @@ export function executeNgfwCommand(session, currentConfig, currentInterfaces, ra
       const parent = iface[1].toLowerCase();
       const unit = iface[2] ? Number(iface[2]) : null;
       if (unit && (unit < 1 || unit > 4094)) output = ['% Subinterface number must be between 1 and 4094.'];
+      else if (unit && config.ports[parent]?.mode !== 'trunk') output = [`% ${parent} must be configured with "mode trunk" before creating subinterfaces.`];
       else {
         const id = unit ? `${parent}.${unit}` : parent;
         if (unit) config.subinterfaces[id] ||= { parent, unit, vlanId: null, zone: id, enabled: true };
@@ -89,7 +90,7 @@ export function executeNgfwCommand(session, currentConfig, currentInterfaces, ra
       const vlanId = Number(vlan[1]);
       if (vlanId < 1 || vlanId > 4094) output = ['% VLAN ID must be between 1 and 4094.'];
       else if (Object.entries(config.subinterfaces).some(([otherId, other]) => otherId !== id && other.parent === target.parent && other.vlanId === vlanId)) output = [`% VLAN ${vlanId} is already assigned on ${target.parent}.`];
-      else { target.vlanId = vlanId; config.ports[target.parent].mode = 'trunk'; if (!config.ports[target.parent].allowedVlans.includes(vlanId)) config.ports[target.parent].allowedVlans.push(vlanId); }
+      else { target.vlanId = vlanId; if (!config.ports[target.parent].allowedVlans.includes(vlanId)) config.ports[target.parent].allowedVlans.push(vlanId); }
     } else if ((lower === 'no vlan' || lower === 'no encapsulation dot1q') && target && !physical) {
       const previous = target.vlanId; target.vlanId = null;
       if (previous) config.ports[target.parent].allowedVlans = config.ports[target.parent].allowedVlans.filter(value => value !== previous);

@@ -22,6 +22,11 @@ test('assignment schema accepts the supported architecture subset and rejects se
   const unsupported = structuredClone(spec);
   unsupported.services = [{ type: 'https' }];
   assert.equal(validateAssignmentSpec(unsupported).valid, false);
+  const tcpSpec = structuredClone(spec);
+  tcpSpec.relationships[0] = { ...tcpSpec.relationships[0], protocol: 'tcp', destinationPort: 443 };
+  assert.equal(validateAssignmentSpec(tcpSpec).valid, true);
+  delete tcpSpec.relationships[0].destinationPort;
+  assert.equal(validateAssignmentSpec(tcpSpec).valid, false, 'TCP relationships require a numeric destination port');
 });
 
 test('assignment evaluation checks roles, routed ICMP, and Layer 2 separation', () => {
@@ -81,4 +86,21 @@ test('assignment evaluation distinguishes allowed traffic from a new reverse con
   const result = evaluateAssignment(firewallSpec, devices, connections);
   assert.equal(result.status, 'passed');
   assert.ok(result.requirements.every(requirement => requirement.status === 'passed'));
+});
+
+test('assignment evaluation grades TCP destination ports without changing legacy ICMP behavior', () => {
+  const tcpSpec = normalizedAssignmentSpec({
+    schemaVersion: '0.1', scenario: { id: 'https-policy', title: 'HTTPS policy' },
+    roles: [{ id: 'client', name: 'Client', deviceTypes: ['pc'], count: 1 }, { id: 'server', name: 'Server', deviceTypes: ['server'], count: 1 }],
+    relationships: [{ id: 'https', from: 'client', to: 'server', action: 'allow', layer: 'l3', protocol: 'tcp', destinationPort: 443 }], constraints: []
+  });
+  const devices = [
+    { id: 'pc', instanceId: 'https-client', assignmentRoleId: 'client', interfaces: { eth0: { address: '10.3.1.10', prefix: 24 } }, gateway: '10.3.1.1' },
+    { id: 'firewall-stateful', instanceId: 'https-firewall', interfaces: { inside: { address: '10.3.1.1', prefix: 24 }, outside: { address: '10.3.2.1', prefix: 24 } }, firewall: { mode: 'stateful', policies: [{ sequence: 10, sourceZone: 'inside', destinationZone: 'outside', protocol: 'tcp', destinationPort: 443, action: 'allow' }, { sequence: 10000, sourceZone: 'any', destinationZone: 'any', protocol: 'any', action: 'deny' }] } },
+    { id: 'server', instanceId: 'https-server', assignmentRoleId: 'server', interfaces: { eth0: { address: '10.3.2.10', prefix: 24 } }, gateway: '10.3.2.1' }
+  ];
+  const connections = [{ a: { deviceId: 'https-client', portId: 'eth0' }, b: { deviceId: 'https-firewall', portId: 'inside' } }, { a: { deviceId: 'https-server', portId: 'eth0' }, b: { deviceId: 'https-firewall', portId: 'outside' } }];
+  assert.equal(evaluateAssignment(tcpSpec, devices, connections).status, 'passed');
+  devices[1].firewall.policies[0].destinationPort = 80;
+  assert.equal(evaluateAssignment(tcpSpec, devices, connections).status, 'failed');
 });

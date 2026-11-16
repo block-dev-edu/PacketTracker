@@ -14,7 +14,7 @@ export function createTopologySimulation(devices, connections) {
   for (const item of devices) {
     if (!getDeviceDefinition(item.id)) continue;
     const simulated = simulation.addDevice(item.instanceId, item.id);
-    for (const field of ['interfaces', 'gateway', 'dhcp', 'nat', 'firewall', 'switching', 'ngfw', 'routerConfig', 'isp', 'ispProvisioning', 'acl', 'leases']) {
+    for (const field of ['interfaces', 'gateway', 'macAddress', 'dhcp', 'nat', 'firewall', 'switching', 'ngfw', 'routerConfig', 'isp', 'ispProvisioning', 'acl', 'leases']) {
       if (item[field] !== undefined && item[field] !== null) simulated[field] = clone(item[field]);
     }
     supported.add(item.instanceId);
@@ -24,6 +24,17 @@ export function createTopologySimulation(devices, connections) {
     .filter(link => supported.has(link.a.deviceId) && supported.has(link.b.deviceId))
     .map(link => ({ a: clone(link.a), b: clone(link.b) }));
   return simulation;
+}
+
+export function broadcastRecipients(devices, connections, sourceId) {
+  const source = devices.find(device => device.instanceId === sourceId);
+  const sourceDefinition = getDeviceDefinition(source?.id);
+  const sourcePorts = sourceDefinition?.ports.filter(port => ['endpoint', 'endpoint-wireless'].includes(port.kind)) || [];
+  if (!source || !sourcePorts.length) return [];
+
+  const simulation = createTopologySimulation(devices, connections);
+  const domainKeys = new Set(sourcePorts.flatMap(port => simulation.domainFor(sourceId, port.id)));
+  return devices.filter(device => device.instanceId !== sourceId && getDeviceDefinition(device.id)?.ports.some(port => domainKeys.has(`${device.instanceId}:${port.id}`))).map(device => device.instanceId);
 }
 
 export function runPing(devices, connections, sourceId, destinationId) {
