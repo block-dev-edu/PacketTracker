@@ -73,6 +73,10 @@ const MIN_ZOOM = 20;
 const MAX_ZOOM = 250;
 const COMPLETION_ENERGY_BUILD_MS = 2100;
 const COMPLETION_ENERGY_BURST_MS = 900;
+const TERMINAL_STATE_PREFIXES = ['packettracker-terminal-switch-', 'packettracker-terminal-ngfw-', 'packettracker-terminal-firewall-', 'packettracker-terminal-router-'];
+// Keep the original full-height inspector implementation available as a
+// one-line fallback while the compact floating treatment is evaluated.
+const COMPACT_INSPECTOR = true;
 
 const serverRoles = [
   { id: 'generic', name: 'Generic Server', icon: Server, purpose: 'A configurable host for custom network services.', capabilities: ['ip'] },
@@ -306,6 +310,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   const [query, setQuery] = useState('');
   const [placed, setPlaced] = useState(() => loadSavedDesign(draft?.devices ?? project?.document?.devices));
   const [selected, setSelected] = useState(null);
+  const [canvasViewport, setCanvasViewport] = useState({ scrollLeft: Number(savedEditorView.scrollLeft) || 0, scrollTop: Number(savedEditorView.scrollTop) || 0 });
   const [zoom, setZoom] = useState(() => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(savedEditorView.zoom) || 100)));
   const [gridLock, setGridLock] = useState(savedEditorView.gridLock === true);
   const [sidebarOpen, setSidebarOpen] = useState(savedEditorView.sidebarOpen !== false);
@@ -400,6 +405,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     const scale = zoom / 100;
     canvas.scrollLeft = Number.isFinite(savedEditorView.scrollLeft) ? savedEditorView.scrollLeft : Math.max(0, CANVAS_ORIGIN_X * scale - 100);
     canvas.scrollTop = Number.isFinite(savedEditorView.scrollTop) ? savedEditorView.scrollTop : Math.max(0, CANVAS_ORIGIN_Y * scale - 80);
+    setCanvasViewport({ scrollLeft: canvas.scrollLeft, scrollTop: canvas.scrollTop });
   }, [zoom]);
 
   useEffect(() => {
@@ -425,6 +431,42 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
   const canFinishActivity = user?.role === 'student' && Boolean(activity) && assignmentTotal > 0 && assignmentPassed === assignmentTotal;
   const assignmentEditor = Boolean(assignmentSpec && !activity);
   const canFinishAssignment = assignmentEditor && !readOnly && assignmentTotal > 0 && assignmentPassed === assignmentTotal;
+  const selectedDevice = selected ? placed.find(item => item.instanceId === selected) : null;
+  const selectedConnectionRecord = selectedConnection ? connections.find(item => item.id === selectedConnection) : null;
+  const deviceInspectorAnchor = (() => {
+    if (!COMPACT_INSPECTOR || !selectedDevice || !canvasRef.current) return null;
+    const scale = zoom / 100;
+    const canvasWidth = canvasRef.current.clientWidth;
+    const canvasHeight = canvasRef.current.clientHeight;
+    const occludedRight = assignmentSpec && activityHelpOpen ? activityPanelWidth : 0;
+    const deviceLeft = (CANVAS_ORIGIN_X + selectedDevice.x) * scale - canvasViewport.scrollLeft;
+    const deviceTop = (CANVAS_ORIGIN_Y + selectedDevice.y) * scale - canvasViewport.scrollTop;
+    const deviceRight = deviceLeft + 53 * scale;
+    const selectedPortCount = getDeviceDefinition(selectedDevice.id)?.ports.length || 0;
+    const preferredWidth = selectedPortCount >= 4 || selectedDevice.id === 'router-advanced' ? 760 : selectedDevice.id.startsWith('firewall-') ? 520 : 480;
+    const popupWidth = Math.min(Math.max(preferredWidth, inspectorWidth), Math.max(300, canvasWidth - occludedRight - 24));
+    const placeRight = deviceRight + popupWidth + 10 <= canvasWidth - occludedRight - 10;
+    const left = placeRight ? deviceRight : Math.max(10, deviceLeft - popupWidth);
+    const top = Math.max(62, Math.min(deviceTop - 96, canvasHeight - 210));
+    return { left, top, width: popupWidth, maxHeight: Math.max(190, canvasHeight - top - 44), placement: placeRight ? 'right' : 'left' };
+  })();
+  const connectionInspectorAnchor = (() => {
+    if (!COMPACT_INSPECTOR || !selectedConnectionRecord || !canvasRef.current) return null;
+    const first = placed.find(item => item.instanceId === selectedConnectionRecord.a.deviceId);
+    const second = placed.find(item => item.instanceId === selectedConnectionRecord.b.deviceId);
+    if (!first || !second) return null;
+    const scale = zoom / 100;
+    const canvasWidth = canvasRef.current.clientWidth;
+    const canvasHeight = canvasRef.current.clientHeight;
+    const occludedRight = assignmentSpec && activityHelpOpen ? activityPanelWidth : 0;
+    const midpointX = (CANVAS_ORIGIN_X + (first.x + second.x) / 2 + 27) * scale - canvasViewport.scrollLeft;
+    const midpointY = (CANVAS_ORIGIN_Y + (first.y + second.y) / 2 + 23) * scale - canvasViewport.scrollTop;
+    const popupWidth = Math.min(Math.max(480, inspectorWidth), Math.max(300, canvasWidth - occludedRight - 24));
+    const placeRight = midpointX + popupWidth + 14 <= canvasWidth - occludedRight - 10;
+    const left = placeRight ? midpointX + 12 : Math.max(10, midpointX - popupWidth - 12);
+    const top = Math.max(62, Math.min(midpointY - 76, canvasHeight - 210));
+    return { left, top, width: popupWidth, maxHeight: Math.max(190, canvasHeight - top - 44), placement: placeRight ? 'right' : 'left' };
+  })();
   const duplicateAlerts = useMemo(() => {
     const byAddress = new Map();
     for (const [deviceId, conflicts] of duplicateIpConflicts) {
@@ -442,6 +484,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     const { scrollLeft, scrollTop } = event.currentTarget;
     if (viewSaveFrameRef.current) cancelAnimationFrame(viewSaveFrameRef.current);
     viewSaveFrameRef.current = requestAnimationFrame(() => {
+      setCanvasViewport({ scrollLeft, scrollTop });
       const previous = loadEditorView(project?.id);
       localStorage.setItem(editorViewKey(project?.id), JSON.stringify({ ...previous, scrollLeft, scrollTop, zoom, gridLock, sidebarOpen, activeCategory, inspectorPanel }));
       viewSaveFrameRef.current = null;
@@ -673,19 +716,16 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     let payload = null;
     if (deviceIds.length) {
       const idSet = new Set(deviceIds);
-      const copyableConnections = connections.filter(connection => {
-        const aSelected = idSet.has(connection.a.deviceId), bSelected = idSet.has(connection.b.deviceId);
-        if (aSelected && bSelected) return true;
-        if (aSelected === bSelected) return false;
-        const external = aSelected ? connection.b : connection.a;
-        const externalDevice = placed.find(item => item.instanceId === external.deviceId);
-        const externalPort = getDeviceDefinition(externalDevice?.id)?.ports.find(port => port.id === external.portId);
-        return isSharedWirelessRadio(externalPort);
-      });
+      const terminalStates = {};
+      for (const instanceId of deviceIds) for (const prefix of TERMINAL_STATE_PREFIXES) {
+        const saved = localStorage.getItem(`${prefix}${instanceId}`);
+        if (saved) (terminalStates[instanceId] ||= {})[prefix] = saved;
+      }
       payload = {
         kind: 'devices',
         devices: serializeDesign(placed.filter(item => idSet.has(item.instanceId))),
-        connections: structuredClone(copyableConnections)
+        connections: structuredClone(connections.filter(connection => idSet.has(connection.a.deviceId) || idSet.has(connection.b.deviceId))),
+        terminalStates
       };
     } else if (selectedArtifact?.type === 'note') {
       const note = notes.find(item => item.id === selectedArtifact.id);
@@ -714,28 +754,76 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
     if (!clipboard) return setToast('Clipboard is empty');
     if (clipboard.kind === 'devices') {
       const idMap = new Map();
+      for (const item of clipboard.devices) idMap.set(item.instanceId, uid());
       const pasted = clipboard.devices.map(item => {
-        const instanceId = uid();
-        idMap.set(item.instanceId, instanceId);
+        const instanceId = idMap.get(item.instanceId);
         const catalogDevice = devices.find(device => device.id === item.id);
         const category = categories.find(entry => entry.id === item.category);
         const role = item.id === 'server' ? serverRoles.find(serverRole => serverRole.id === item.serverRole) : null;
         return { ...structuredClone(item), instanceId, x: item.x + 30, y: item.y + 30, icon: role?.icon || catalogDevice?.icon || category?.icon || AppWindow };
       });
+      const allDevices = [...placed, ...pasted];
+      const deviceById = new Map(allDevices.map(item => [item.instanceId, item]));
+      const reservedPorts = new Set(connections.flatMap(connection => [connection.a, connection.b]).map(endpoint => `${endpoint.deviceId}:${endpoint.portId}`));
+      const peerPortUpdates = [];
       const pastedConnections = clipboard.connections.flatMap(connection => {
-        const remap = endpoint => ({ ...endpoint, deviceId: idMap.get(endpoint.deviceId) || endpoint.deviceId });
-        const a = remap(connection.a), b = remap(connection.b);
-        const external = idMap.has(connection.a.deviceId) ? b : idMap.has(connection.b.deviceId) ? a : null;
-        if (external) {
-          const externalDevice = placed.find(item => item.instanceId === external.deviceId);
-          const externalPort = getDeviceDefinition(externalDevice?.id)?.ports.find(port => port.id === external.portId);
-          if (!externalDevice || !isSharedWirelessRadio(externalPort)) return [];
+        const aCopied = idMap.has(connection.a.deviceId), bCopied = idMap.has(connection.b.deviceId);
+        let a = { ...connection.a, deviceId: idMap.get(connection.a.deviceId) || connection.a.deviceId };
+        let b = { ...connection.b, deviceId: idMap.get(connection.b.deviceId) || connection.b.deviceId };
+        if (aCopied !== bCopied) {
+          const copied = aCopied ? a : b;
+          const external = aCopied ? b : a;
+          const copiedDevice = deviceById.get(copied.deviceId);
+          const copiedPort = getDeviceDefinition(copiedDevice?.id)?.ports.find(port => port.id === copied.portId);
+          const externalDevice = deviceById.get(external.deviceId);
+          const externalPorts = getDeviceDefinition(externalDevice?.id)?.ports || [];
+          const originalIndex = Math.max(0, externalPorts.findIndex(port => port.id === external.portId));
+          const orderedPorts = [...externalPorts.slice(originalIndex + 1), ...externalPorts.slice(0, originalIndex + 1)];
+          const nextPort = orderedPorts.find(port => {
+            if (isWirelessPort(port) !== isWirelessPort(copiedPort)) return false;
+            if (externalDevice?.switching?.ports?.[port.id]?.enabled === false) return false;
+            return isSharedWirelessRadio(port) || !reservedPorts.has(`${external.deviceId}:${port.id}`);
+          });
+          if (!externalDevice || !copiedPort || !nextPort) return [];
+          const originalPortConfig = externalDevice.switching?.ports?.[external.portId];
+          if (originalPortConfig && nextPort.id !== external.portId) peerPortUpdates.push({ deviceId: external.deviceId, portId: nextPort.id, config: structuredClone(originalPortConfig) });
+          external.portId = nextPort.id;
         }
-        return [{ ...structuredClone(connection), id: uid(), a, b }];
+        const cloned = { ...structuredClone(connection), id: uid(), a, b };
+        if (cloned.provisioning) {
+          cloned.provisioning = {
+            ...cloned.provisioning,
+            providerId: idMap.get(cloned.provisioning.providerId) || cloned.provisioning.providerId,
+            edgeId: idMap.get(cloned.provisioning.edgeId) || cloned.provisioning.edgeId
+          };
+        }
+        for (const endpoint of [a, b]) {
+          const endpointDevice = deviceById.get(endpoint.deviceId);
+          const endpointPort = getDeviceDefinition(endpointDevice?.id)?.ports.find(port => port.id === endpoint.portId);
+          if (!isSharedWirelessRadio(endpointPort)) reservedPorts.add(`${endpoint.deviceId}:${endpoint.portId}`);
+        }
+        return [cloned];
       });
-      setPlaced(current => [...current, ...pasted]);
+      for (const [sourceId, states] of Object.entries(clipboard.terminalStates || {})) {
+        const pastedId = idMap.get(sourceId);
+        if (!pastedId) continue;
+        for (const [prefix, saved] of Object.entries(states)) try { localStorage.setItem(`${prefix}${pastedId}`, saved); } catch { /* Device configuration remains available without terminal scrollback. */ }
+      }
+      setPlaced(current => [
+        ...current.map(item => {
+          const updates = peerPortUpdates.filter(update => update.deviceId === item.instanceId);
+          if (!updates.length) return item;
+          const ports = { ...(item.switching?.ports || {}) };
+          for (const update of updates) ports[update.portId] = update.config;
+          return { ...item, switching: { ...item.switching, ports } };
+        }),
+        ...pasted
+      ]);
       setConnections(current => [...current, ...pastedConnections]);
       setSelected(null); setSelectedIds(pasted.map(item => item.instanceId)); setSelectedArtifact(null);
+      const skippedConnections = Math.max(0, clipboard.connections.length - pastedConnections.length);
+      setToast(skippedConnections ? `Pasted; ${skippedConnections} connection${skippedConnections === 1 ? '' : 's'} skipped because no compatible port was available` : 'Pasted with configuration and connections');
+      return;
     } else if (clipboard.kind === 'note') {
       const item = { ...structuredClone(clipboard.item), id: uid(), x: clipboard.item.x + 30, y: clipboard.item.y + 30 };
       setNotes(current => [...current, item]); setSelectedArtifact({ type: 'note', id: item.id }); setSelected(null); setSelectedIds([]);
@@ -1411,8 +1499,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
       <div className="brand editor-brand"><img className="editor-brand-logo" src="/packettracker-logo-with-text.png" alt="PacketTracker"/></div>
       <div className="project-header-nav"><span className="file-name">{project?.name || 'Untitled Network'}</span><button className="back-to-projects" onClick={onBack}>{activity ? 'Back to skills' : assignmentEditor ? 'Back to assignments' : 'Back to projects'}</button></div>
       <div className="top-actions">
-        {activity && <><span className={`activity-save-state ${activitySaveState}`}>{activitySaveState === 'saving' ? 'Saving…' : activitySaveState === 'error' ? 'Save failed' : 'Progress saved'}</span><button className="button secondary" disabled={activityBusy} onClick={resetActivity}><RotateCcw size={16}/> Reset activity</button><button className={`button secondary ${activityHelpOpen ? 'active' : ''}`} onClick={() => setActivityHelpOpen(true)}><CircleHelp size={16}/> Info</button>{canFinishActivity ? <button className="button primary activity-complete-button" disabled={activityBusy || activitySaveState === 'saving'} onClick={completeActivity}><ShieldCheck size={16}/>{activityBusy ? 'Finishing…' : 'Finish'}</button> : <button className="button primary" disabled={activitySaveState === 'saving'} onClick={saveActivityProgress}><Save size={16}/>{activitySaveState === 'saving' ? 'Saving…' : 'Save'}</button>}</>}
-        {assignmentEditor && <><button className="button secondary" disabled={activityBusy || readOnly} onClick={resetAssignment}><RotateCcw size={16}/> Reset assignment</button><button className={`button secondary ${activityHelpOpen ? 'active' : ''}`} onClick={() => setActivityHelpOpen(true)}><CircleHelp size={16}/> Info</button>{canFinishAssignment ? <button className="button primary activity-complete-button" disabled={activityBusy} onClick={completeAssignment}><ShieldCheck size={16}/>{activityBusy ? 'Finishing…' : 'Finish'}</button> : <button className="button primary" disabled={readOnly} onClick={saveDesign}><Save size={16}/> {readOnly ? 'Read only' : 'Save'}</button>}</>}
+        {activity && <><span className={`activity-save-state ${activitySaveState}`}>{activitySaveState === 'saving' ? 'Saving…' : activitySaveState === 'error' ? 'Save failed' : 'Progress saved'}</span><button className="button secondary" disabled={activityBusy} onClick={resetActivity}><RotateCcw size={16}/> Reset activity</button><button className={`button secondary ${activityHelpOpen ? 'active' : ''}`} aria-expanded={activityHelpOpen} onClick={() => setActivityHelpOpen(open => !open)}><CircleHelp size={16}/> Info</button>{canFinishActivity ? <button className="button primary activity-complete-button" disabled={activityBusy || activitySaveState === 'saving'} onClick={completeActivity}><ShieldCheck size={16}/>{activityBusy ? 'Finishing…' : 'Finish'}</button> : <button className="button primary" disabled={activitySaveState === 'saving'} onClick={saveActivityProgress}><Save size={16}/>{activitySaveState === 'saving' ? 'Saving…' : 'Save'}</button>}</>}
+        {assignmentEditor && <><button className="button secondary" disabled={activityBusy || readOnly} onClick={resetAssignment}><RotateCcw size={16}/> Reset assignment</button><button className={`button secondary ${activityHelpOpen ? 'active' : ''}`} aria-expanded={activityHelpOpen} onClick={() => setActivityHelpOpen(open => !open)}><CircleHelp size={16}/> Info</button>{canFinishAssignment ? <button className="button primary activity-complete-button" disabled={activityBusy} onClick={completeAssignment}><ShieldCheck size={16}/>{activityBusy ? 'Finishing…' : 'Finish'}</button> : <button className="button primary" disabled={readOnly} onClick={saveDesign}><Save size={16}/> {readOnly ? 'Read only' : 'Save'}</button>}</>}
         {assignmentSpec && <div className={`assignment-summary-button assignment-summary-indicator ${assignmentProgress}`} style={{ '--challenge-progress': `${assignmentPercent}%` }} aria-label={`Challenge progress: ${assignmentPassed} of ${assignmentTotal} complete`}><FilePlus2 size={17}/><span>Challenge progress</span><small>{assignmentPassed} of {assignmentTotal} complete</small></div>}
         <button className="icon-button" title="Undo (Ctrl+Z)" disabled={!historyRef.current.past.length && !pendingHistoryRef.current} onClick={undoDesign}><Undo2 size={17}/></button>
         <button className="icon-button" title="Redo (Ctrl+Y)" disabled={!historyRef.current.future.length} onClick={redoDesign}><Redo2 size={17}/></button>
@@ -1568,7 +1656,8 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
           <div className="zoom-control"><button onClick={() => setZoom(z => Math.max(MIN_ZOOM, z - 10))}><ZoomOut size={16}/></button><input type="range" min={MIN_ZOOM} max={MAX_ZOOM} value={zoom} onChange={e => setZoom(Number(e.target.value))}/><span>{Math.round(zoom)}%</span><button onClick={() => setZoom(z => Math.min(MAX_ZOOM, z + 10))}><ZoomIn size={16}/></button><button onClick={() => setZoom(100)}><RotateCcw size={14}/></button></div>
         </div>
         {selected && <DeviceInspector
-          item={placed.find(item => item.instanceId === selected)}
+          item={selectedDevice}
+          anchor={deviceInspectorAnchor}
           onClose={() => setSelected(null)}
           onInterfaceChange={updateInterface}
           onGatewayChange={updateGateway}
@@ -1588,7 +1677,7 @@ function EditorApp({ project, user, onSave, onBack, readOnly = false, activity =
           onWidthChange={setInspectorWidth}
           cancelToken={cancelToken}
         />}
-        {selectedConnection && <ConnectionInspector connection={connections.find(item => item.id === selectedConnection)} validation={connectionValidations.get(selectedConnection)} width={inspectorWidth} onWidthChange={setInspectorWidth} onClose={() => setSelectedConnection(null)} cancelToken={cancelToken}/>} 
+        {selectedConnection && <ConnectionInspector connection={selectedConnectionRecord} validation={connectionValidations.get(selectedConnection)} anchor={connectionInspectorAnchor} width={inspectorWidth} onWidthChange={setInspectorWidth} onClose={() => setSelectedConnection(null)} cancelToken={cancelToken}/>}
       </section>
     </main>
     {contextMenu?.type === 'connection' && (() => {
@@ -1857,8 +1946,9 @@ function describePort(port) {
 
 const connectionStatusLabels = { operational: 'Operational', partial: 'Partial', misconfigured: 'Misconfigured', down: 'Down', unevaluated: 'Not evaluated' };
 
-function InspectorSection({ title, badge, defaultOpen = false, className = '', children }) {
+function InspectorSection({ title, badge, defaultOpen = false, className = '', frameless = false, children }) {
   const [open, setOpen] = useState(defaultOpen);
+  if (frameless) return <section className={`inspector-section inspector-section-frameless ${className}`}>{children}</section>;
   return <section className={`inspector-section inspector-collapsible ${open ? 'open' : ''} ${className}`}>
     <button type="button" className="inspector-section-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
       <h3>{title}</h3>{badge != null && <span>{badge}</span>}<ChevronDown size={15}/>
@@ -1867,7 +1957,7 @@ function InspectorSection({ title, badge, defaultOpen = false, className = '', c
   </section>;
 }
 
-function ConnectionInspector({ connection, validation, width, onWidthChange, onClose, cancelToken }) {
+function ConnectionInspector({ connection, validation, anchor, width, onWidthChange, onClose, cancelToken }) {
   const resize = useRef(null);
   useEffect(() => {
     if (!resize.current) return;
@@ -1888,7 +1978,7 @@ function ConnectionInspector({ connection, validation, width, onWidthChange, onC
     onWidthChange(Math.max(260, Math.min(maximum, resize.current.width + (resize.current.x - event.clientX) / uiScale)));
   }
 
-  return <aside className="inspector connection-inspector" style={{ width }} onPointerDown={event => event.stopPropagation()}>
+  return <aside className={`inspector connection-inspector ${COMPACT_INSPECTOR ? `inspector-compact inspector-device-popover placement-${anchor?.placement || 'right'}` : ''}`} style={anchor ? { width: anchor.width, left: anchor.left, top: anchor.top, maxHeight: anchor.maxHeight } : { width }} onPointerDown={event => event.stopPropagation()}>
     <div className="inspector-resize-handle" role="separator" aria-label="Resize connection inspector" aria-orientation="vertical" tabIndex="0" onPointerDown={startResize} onPointerMove={continueResize} onPointerUp={() => { resize.current = null; }}/>
     <div className="inspector-scroll">
       <div className="inspector-header"><div><span>Connection inspector</span><div className="inspector-device-name"><strong>{connection.label || `${validation.type} connection`}</strong></div></div><button className="icon-button" onClick={onClose}><X size={16}/></button></div>
@@ -1906,7 +1996,7 @@ function ConnectionInspector({ connection, validation, width, onWidthChange, onC
   </aside>;
 }
 
-function DeviceInspector({ item, onClose, onInterfaceChange, onGatewayChange, connectMode, pendingPort, connections, allDevices, ipConflicts, onConnectPort, panel, onPanelChange, onSwitchingChange, onNgfwChange, onRouterChange, onNameChange, width, onWidthChange, cancelToken }) {
+function DeviceInspector({ item, anchor, onClose, onInterfaceChange, onGatewayChange, connectMode, pendingPort, connections, allDevices, ipConflicts, onConnectPort, panel, onPanelChange, onSwitchingChange, onNgfwChange, onRouterChange, onNameChange, width, onWidthChange, cancelToken }) {
   const resize = useRef(null);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(item?.customName || item?.name || '');
@@ -1921,7 +2011,12 @@ function DeviceInspector({ item, onClose, onInterfaceChange, onGatewayChange, co
   const ports = definition?.ports || [];
   const bridgeIds = [...new Set(ports.map(port => port.bridge).filter(Boolean))];
   const networkInterfaces = [...ports.filter(port => ['routed', 'endpoint', 'endpoint-wireless'].includes(port.kind)).map(port => ({ id: port.id, label: port.label })), ...bridgeIds.map(id => ({ id, label: `${id.toUpperCase()} bridge` }))];
+  const hasDefaultGateway = ports.some(port => ['endpoint', 'endpoint-wireless'].includes(port.kind));
+  const interfaceRowCount = networkInterfaces.length + (hasDefaultGateway ? 1 : 0);
   const linkedPortCount = ports.filter(port => connections.some(connection => [connection.a, connection.b].some(end => end.deviceId === item.instanceId && end.portId === port.id))).length;
+  const compactPortCards = ports.length > 0;
+  const prominentPhysicalPorts = ['switch-basic', 'switch-managed'].includes(item.id) || item.id.startsWith('firewall-');
+  const enabledCapabilities = featureLabels(item.capabilities || definition?.capabilities || []);
 
   function startResize(event) {
     event.preventDefault(); event.stopPropagation();
@@ -1952,17 +2047,30 @@ function DeviceInspector({ item, onClose, onInterfaceChange, onGatewayChange, co
     return [...new Set(addresses)];
   }
 
-  return <aside className="inspector" style={{ width }} onPointerDown={event => event.stopPropagation()}>
+  const prominentIpInterfaces = ['pc', 'laptop'].includes(item.id);
+  const ipInterfaceTable = interfaceRowCount ? <div className="ip-interface-table-wrap"><table className="ip-interface-table"><thead><tr><th>Interface</th><th>Address</th></tr></thead><tbody>
+    {networkInterfaces.map(networkInterface => {
+      const provisioned = item.ispProvisioning?.[networkInterface.id];
+      const providerLocked = ['internet', 'isp-network'].includes(item.id);
+      const locked = Boolean(provisioned || providerLocked);
+      const config = item.interfaces?.[networkInterface.id];
+      return <tr className={locked ? 'locked' : ''} key={networkInterface.id}><td><strong className="interface-name-cell">{networkInterface.label}{locked && <LockKeyhole size={13} aria-label={providerLocked ? 'Fixed ISP gateway' : 'ISP-provided configuration'}/>}</strong></td><td>{locked ? (config?.address ? `${config.address}/${config.prefix ?? 24}` : 'Not configured') : <div className="interface-address-editor"><input aria-label={`${networkInterface.label} IP address`} placeholder="IP address" value={config?.address || ''} onChange={event => onInterfaceChange(item.instanceId, networkInterface.id, 'address', event.target.value)}/><span>/</span><input aria-label={`${networkInterface.label} prefix`} type="number" min="0" max="32" value={config?.prefix ?? 24} onChange={event => onInterfaceChange(item.instanceId, networkInterface.id, 'prefix', event.target.value)}/></div>}</td></tr>;
+    })}
+    {hasDefaultGateway && <tr><td><strong>Default gateway</strong></td><td><input aria-label="Default gateway" placeholder="Example: 10.1.10.1" value={item.gateway || ''} onChange={event => onGatewayChange(item.instanceId, event.target.value)}/></td></tr>}
+  </tbody></table></div> : <p>No configurable IP interfaces.</p>;
+
+  return <aside className={`inspector ${COMPACT_INSPECTOR ? `inspector-compact inspector-device-popover placement-${anchor?.placement || 'right'} ${item.id.startsWith('firewall-') ? 'firewall-device-popover' : ''} ${ports.length >= 4 ? 'wide-port-popover' : ''} ${anchor?.width < 700 ? 'popover-narrow' : ''}` : ''}`} style={anchor ? { width: anchor.width, left: anchor.left, top: anchor.top, maxHeight: anchor.maxHeight } : { width }} onPointerDown={event => event.stopPropagation()}>
     <div className="inspector-resize-handle" role="separator" aria-label="Resize device inspector" aria-orientation="vertical" tabIndex="0" onKeyDown={event => { if (event.key === 'ArrowLeft') onWidthChange(Math.min(640, width + 20)); else if (event.key === 'ArrowRight') onWidthChange(Math.max(260, width - 20)); }} onPointerDown={startResize} onPointerMove={continueResize} onPointerUp={() => { resize.current = null; }}/>
     <div className="inspector-scroll">
     <div className="inspector-header">
-      <div><span>Device inspector</span><div className="inspector-device-name">{editingName ? <input autoFocus value={nameDraft} maxLength="48" aria-label="Custom device name" onChange={event => setNameDraft(event.target.value)} onBlur={saveName} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setNameDraft(item.customName || item.name); setEditingName(false); } }}/> : <><strong>{item.customName || item.name}</strong><button className="rename-device" title="Rename device" aria-label="Rename device" onClick={() => setEditingName(true)}><Pencil size={12}/></button></>}</div></div>
+      <div><span>Device inspector</span><div className="inspector-device-name">{editingName ? <input autoFocus value={nameDraft} maxLength="48" aria-label="Custom device name" onChange={event => setNameDraft(event.target.value)} onBlur={saveName} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setNameDraft(item.customName || item.name); setEditingName(false); } }}/> : <><strong>{item.customName || item.name}</strong><button className="rename-device" title="Rename device" aria-label="Rename device" onClick={() => setEditingName(true)}><Pencil size={12}/></button><span className="capabilities-pill" tabIndex="0">Capabilities<span className="capabilities-tooltip" role="tooltip"><b>Enabled capabilities</b>{enabledCapabilities.length ? <span>{enabledCapabilities.map(feature => <i key={feature}>{feature}</i>)}</span> : <small>No additional capabilities</small>}</span></span></>}</div></div>
       <button className="icon-button" onClick={onClose}><X size={16}/></button>
     </div>
     {!!ipConflicts.length && <div className="device-ip-conflict"><CircleHelp size={14}/><span><strong>Duplicate IP address detected</strong><small>{[...new Set(ipConflicts.map(conflict => conflict.address))].join(', ')} is already used by another device on this local network. Assign a unique address.</small></span></div>}
+    {prominentIpInterfaces && <div className="prominent-ip-interfaces">{ipInterfaceTable}</div>}
     {!definition ? <div className="inspector-empty">Detailed simulation is not available for this device yet.</div> : <>
-      <InspectorSection key={`${item.instanceId}-ports`} title="Physical ports" badge={`${linkedPortCount}/${ports.length} linked`} defaultOpen={item.id !== 'switch-managed'}>
-        <div className="port-list">{ports.map(port => {
+      <InspectorSection key={`${item.instanceId}-ports`} title="Physical ports" badge={`${linkedPortCount}/${ports.length} linked`} frameless={prominentPhysicalPorts}>
+        <div className={`port-list ${compactPortCards ? 'centered-port-list' : ''}`} style={compactPortCards ? { '--port-columns': Math.min(4, ports.length) } : undefined}>{ports.map(port => {
           const isPending = pendingPort?.deviceId === item.instanceId && pendingPort?.portId === port.id;
           const link = connections.find(connection => [connection.a, connection.b].some(end => end.deviceId === item.instanceId && end.portId === port.id));
           const isConnected = Boolean(link);
@@ -1970,46 +2078,42 @@ function DeviceInspector({ item, onClose, onInterfaceChange, onGatewayChange, co
           const peer = peerEnd && allDevices.find(device => device.instanceId === peerEnd.deviceId);
           const peerPort = peerEnd && getDeviceDefinition(peer?.id)?.ports.find(candidate => candidate.id === peerEnd.portId);
           const peerAddresses = peerInterfaceAddresses(peer, peerPort);
-          const peerDetails = peer && <div className="port-peer-details"><span>Connected device</span><strong>{peer.customName || peer.name}</strong><small>{[peerPort?.label, peerAddresses.length ? `${peerAddresses.length === 1 ? 'IP' : 'IPs'} ${peerAddresses.join(', ')}` : null].filter(Boolean).join(' · ') || 'Physical connection'}</small></div>;
+          const peerDetails = peer && (compactPortCards
+            ? <div className="port-peer-details compact-peer-details"><strong>{peerAddresses.length ? peerAddresses.map(address => <span key={address}>{address}</span>) : <span>No IP address</span>}</strong><small>{peer.name}</small></div>
+            : <div className="port-peer-details"><span>Connected device</span><strong>{peer.customName || peer.name}</strong><small>{[peerPort?.label, peerAddresses.length ? `${peerAddresses.length === 1 ? 'IP' : 'IPs'} ${peerAddresses.join(', ')}` : null].filter(Boolean).join(' · ') || 'Physical connection'}</small></div>);
           const switchPort = item.switching?.ports?.[port.id];
           const vlanName = switchPort ? item.switching.vlans?.[switchPort.accessVlan] : null;
+          const isPlainAvailable = !isConnected && (!switchPort || (switchPort.enabled && switchPort.mode !== 'trunk' && Number(switchPort.accessVlan || 1) === 1 && !switchPort.description));
           if (switchPort) return <div className={`managed-port-row ${isPending ? 'pending' : ''}`} key={port.id}>
-            <div className="managed-port-identity"><div className={`port-symbol ${port.kind}`}><EthernetPort size={14}/></div><div><strong>{port.label}</strong><span>{isConnected ? 'Physical link active' : switchPort.enabled ? (switchPort.description || 'Enabled access port') : 'Shutdown'}</span></div></div>
-            <small className="vlan-badge" title={switchPort.mode === 'trunk' ? `802.1Q trunk carrying ${(switchPort.allowedVlans || []).join(', ') || 'all configured VLANs'}` : `VLAN ${switchPort.accessVlan}: ${vlanName || 'Unnamed'}`}><b>{switchPort.mode === 'trunk' ? '802.1Q trunk' : `VLAN ${switchPort.accessVlan}`}</b><em>{switchPort.mode === 'trunk' ? ((switchPort.allowedVlans || []).join(', ') || 'All VLANs') : (vlanName || 'Unnamed')}</em></small>
-            {connectMode ? <button className="port-connect" disabled={isConnected || !switchPort.enabled} onClick={() => onConnectPort(item.instanceId, port.id)}>{isConnected ? 'Linked' : !switchPort.enabled ? 'Shutdown' : isPending ? 'Selected' : 'Connect'}</button> : <span className={`port-link-state ${isConnected ? 'linked' : switchPort.enabled ? 'available' : 'shutdown'}`}>{isConnected ? 'Linked' : switchPort.enabled ? 'Available' : 'Shutdown'}</span>}
+            <div className="managed-port-identity"><div className={`port-symbol ${port.kind} ${isPlainAvailable ? 'unused' : ''}`}><EthernetPort size={14}/></div><div><strong>{port.label}</strong>{!compactPortCards && !isPlainAvailable && <span>{isConnected ? 'Physical link active' : switchPort.enabled ? (switchPort.description || 'Enabled access port') : 'Shutdown'}</span>}</div></div>
+            {!isPlainAvailable && <small className={`vlan-badge ${switchPort.mode === 'trunk' ? 'trunk' : ''}`} title={switchPort.mode === 'trunk' ? `802.1Q trunk carrying ${(switchPort.allowedVlans || []).join(', ') || 'all configured VLANs'}` : `VLAN ${switchPort.accessVlan}: ${vlanName || 'Unnamed'}`}><b>{switchPort.mode === 'trunk' ? `Trunk ${(switchPort.allowedVlans || []).join(',') || 'all'}` : `VLAN ${switchPort.accessVlan}`}</b>{switchPort.mode !== 'trunk' && <em>{vlanName || 'Unnamed'}</em>}</small>}
+            {isConnected && compactPortCards ? null : connectMode ? <button className="port-connect" disabled={isConnected || !switchPort.enabled} onClick={() => onConnectPort(item.instanceId, port.id)}>{isConnected ? 'Linked' : !switchPort.enabled ? 'Shutdown' : isPending ? 'Selected' : 'Connect'}</button> : isPlainAvailable ? null : <span className={`port-link-state ${isConnected ? 'linked' : switchPort.enabled ? 'available' : 'shutdown'}`}>{isConnected ? 'Linked' : switchPort.enabled ? 'Available' : 'Shutdown'}</span>}
             {peerDetails}
           </div>;
           return <div className={`port-row ${isPending ? 'pending' : ''}`} key={port.id}>
-            <div className={`port-symbol ${port.kind}`}><EthernetPort size={14}/></div>
-            <div><strong>{port.label}</strong><span>{isConnected ? 'Physical link active' : describePort(port)}</span></div>
-            {connectMode ? <button className="port-connect" disabled={isConnected} onClick={() => onConnectPort(item.instanceId, port.id)}>{isConnected ? 'Linked' : isPending ? 'Selected' : 'Connect'}</button> : <span className={`port-link-state ${isConnected ? 'linked' : 'available'}`}>{isConnected ? 'Linked' : 'Available'}</span>}
+            <div className={`port-symbol ${port.kind} ${isPlainAvailable ? 'unused' : ''}`}><EthernetPort size={14}/></div>
+            <div><strong>{port.label}</strong>{!compactPortCards && <span>{isConnected ? 'Physical link active' : describePort(port)}</span>}</div>
+            {compactPortCards && isConnected
+              ? null
+              : connectMode ? <button className="port-connect" disabled={isConnected} onClick={() => onConnectPort(item.instanceId, port.id)}>{isConnected ? 'Linked' : isPending ? 'Selected' : 'Connect'}</button> : null}
             {peerDetails}
           </div>;
         })}</div>
       </InspectorSection>
       {(item.id === 'firewall-ngfw' || item.id === 'router-advanced') && <VlanSubinterfaceEditor item={item} ports={ports} onNgfwChange={onNgfwChange} onRouterChange={onRouterChange}/>} 
       {item.id === 'switch-managed' && <ManagedSwitchSummary item={item} ports={ports}/>} 
-      <InspectorSection key={`${item.instanceId}-interfaces`} title="IP interfaces" badge={networkInterfaces.length || 'None'} defaultOpen={item.id !== 'switch-managed'}>
-        {networkInterfaces.map(networkInterface => {
-          const provisioned = item.ispProvisioning?.[networkInterface.id];
-          const providerLocked = ['internet', 'isp-network'].includes(item.id);
-          const locked = Boolean(provisioned || providerLocked);
-          return <div className={`interface-config ${locked ? 'isp-locked' : ''}`} key={networkInterface.id}>
-            <label>{networkInterface.label}{locked && <small>{providerLocked ? 'ISP gateway · fixed' : 'ISP provided'}</small>}</label>
-            <div><input aria-label={`${networkInterface.label} IP address`} readOnly={locked} placeholder="IP address" value={item.interfaces?.[networkInterface.id]?.address || ''} onChange={event => onInterfaceChange(item.instanceId, networkInterface.id, 'address', event.target.value)}/><span>/</span><input aria-label={`${networkInterface.label} prefix`} readOnly={locked} type="number" min="0" max="32" value={item.interfaces?.[networkInterface.id]?.prefix ?? 24} onChange={event => onInterfaceChange(item.instanceId, networkInterface.id, 'prefix', event.target.value)}/></div>
-            {provisioned && <p>Mask 255.255.255.252 · Default gateway {provisioned.gateway}</p>}
-          </div>;
-        })}
-        {ports.some(port => ['endpoint', 'endpoint-wireless'].includes(port.kind)) && <div className="gateway-config">
-          <label htmlFor={`gateway-${item.instanceId}`}>Default gateway</label>
-          <input id={`gateway-${item.instanceId}`} aria-label="Default gateway" placeholder="Example: 10.1.10.1" value={item.gateway || ''} onChange={event => onGatewayChange(item.instanceId, event.target.value)}/>
-          <p>Required to reach devices outside this endpoint’s local subnet.</p>
-        </div>}
-        {!networkInterfaces.length && <p>No configurable IP interfaces.</p>}
-      </InspectorSection>
-      <InspectorSection key={`${item.instanceId}-capabilities`} title="Enabled capabilities" badge={featureLabels(item.capabilities || definition.capabilities).length}>
-        <div className="inspector-capabilities">{featureLabels(item.capabilities || definition.capabilities).map(feature => <span key={feature}>✓ {feature}</span>)}</div>
-      </InspectorSection>
+      {!prominentIpInterfaces && <InspectorSection key={`${item.instanceId}-interfaces`} title="IP interfaces" badge={interfaceRowCount || 'None'}>
+        {interfaceRowCount ? <div className="ip-interface-table-wrap"><table className="ip-interface-table"><thead><tr><th>Interface</th><th>Address</th></tr></thead><tbody>
+          {networkInterfaces.map(networkInterface => {
+            const provisioned = item.ispProvisioning?.[networkInterface.id];
+            const providerLocked = ['internet', 'isp-network'].includes(item.id);
+            const locked = Boolean(provisioned || providerLocked);
+            const config = item.interfaces?.[networkInterface.id];
+            return <tr className={locked ? 'locked' : ''} key={networkInterface.id}><td><strong className="interface-name-cell">{networkInterface.label}{locked && <LockKeyhole size={13} aria-label={providerLocked ? 'Fixed ISP gateway' : 'ISP-provided configuration'}/>}</strong></td><td>{locked ? (config?.address ? `${config.address}/${config.prefix ?? 24}` : 'Not configured') : <div className="interface-address-editor"><input aria-label={`${networkInterface.label} IP address`} placeholder="IP address" value={config?.address || ''} onChange={event => onInterfaceChange(item.instanceId, networkInterface.id, 'address', event.target.value)}/><span>/</span><input aria-label={`${networkInterface.label} prefix`} type="number" min="0" max="32" value={config?.prefix ?? 24} onChange={event => onInterfaceChange(item.instanceId, networkInterface.id, 'prefix', event.target.value)}/></div>}</td></tr>;
+          })}
+          {hasDefaultGateway && <tr><td><strong>Default gateway</strong></td><td><input aria-label="Default gateway" placeholder="Example: 10.1.10.1" value={item.gateway || ''} onChange={event => onGatewayChange(item.instanceId, event.target.value)}/></td></tr>}
+        </tbody></table></div> : <p>No configurable IP interfaces.</p>}
+      </InspectorSection>}
     </>}
     </div>
   </aside>;
@@ -2019,7 +2123,7 @@ function ManagedSwitchSummary({ item, ports }) {
   const switching = item.switching;
   if (!switching) return null;
   const isSaved = item.startupSwitching && JSON.stringify(item.startupSwitching) === JSON.stringify(switching);
-  return <InspectorSection title="VLANs and switch state" badge={isSaved ? 'Saved' : 'Unsaved'} defaultOpen className={`switch-summary ${isSaved ? 'config-saved' : 'config-unsaved'}`}>
+  return <InspectorSection title="VLANs and switch state" badge={isSaved ? 'Saved' : 'Unsaved'} className={`switch-summary ${isSaved ? 'config-saved' : 'config-unsaved'}`}>
     <div className="switch-identity"><span>Hostname</span><strong>{switching.hostname}</strong></div>
     <div className="vlan-summary-list">{Object.entries(switching.vlans).sort((a, b) => Number(a[0]) - Number(b[0])).map(([vlanId, vlanName]) => {
       const members = Object.entries(switching.ports).filter(([, config]) => String(config.accessVlan) === vlanId).map(([portId]) => ports.find(port => port.id === portId)?.label || portId);
@@ -2051,8 +2155,7 @@ function saveTerminalState(key, session, command, lines, history) {
 
 function clearTerminalStates(devices = []) {
   const instanceIds = new Set(devices.map(device => device?.instanceId).filter(Boolean));
-  const terminalPrefixes = ['packettracker-terminal-switch-', 'packettracker-terminal-ngfw-', 'packettracker-terminal-firewall-', 'packettracker-terminal-router-'];
-  for (const instanceId of instanceIds) for (const prefix of terminalPrefixes) localStorage.removeItem(`${prefix}${instanceId}`);
+  for (const instanceId of instanceIds) for (const prefix of TERMINAL_STATE_PREFIXES) localStorage.removeItem(`${prefix}${instanceId}`);
 }
 
 function shouldCloseCli(session, entered) {
@@ -2298,23 +2401,26 @@ function VlanSubinterfaceEditor({ item, ports, onNgfwChange, onRouterChange }) {
     update(next, interfaces);
   }
   const entries = Object.entries(config?.subinterfaces || {});
-  return <section className="inspector-section subinterface-editor">
-    <h3>VLAN subinterfaces <button type="button" onClick={addSubinterface}>Add subinterface</button></h3>
-    <p className="subinterface-intro">Create the subinterface, explicitly assign its {isNgfw ? 'VLAN' : '802.1Q encapsulation'}, then configure its gateway address.</p>
+  const interfaceGroups = ports.map(port => ({ port, entries: entries.filter(([, sub]) => sub.parent === port.id) })).filter(group => group.entries.length);
+  const subinterfaceCard = ([id, sub]) => {
+    const duplicate = sub.vlanId != null && entries.some(([otherId, other]) => otherId !== id && other.parent === sub.parent && other.vlanId === sub.vlanId);
+    return <React.Fragment key={id}><tr className={sub.vlanId == null || duplicate ? 'incomplete' : ''}>
+      <td><strong>{id}</strong></td>
+      <td><select aria-label={`${id} physical interface`} value={sub.parent} onChange={event => changeSubinterface(id, 'parent', event.target.value)}>{ports.map(port => <option value={port.id} key={port.id}>{port.label}</option>)}</select></td>
+      <td><input aria-label={`${id} VLAN ID`} type="number" min="1" max="4094" placeholder="Required" value={sub.vlanId ?? ''} onChange={event => changeSubinterface(id, 'vlanId', event.target.value)}/></td>
+      <td><div className="subinterface-address"><input aria-label={`${id} IP address`} placeholder="IP address" value={item.interfaces?.[id]?.address || ''} onChange={event => changeSubinterface(id, 'address', event.target.value)}/><span>/</span><input aria-label={`${id} prefix`} type="number" min="0" max="32" value={item.interfaces?.[id]?.prefix ?? 24} onChange={event => changeSubinterface(id, 'prefix', event.target.value)}/></div></td>
+      {isNgfw && <td><input aria-label={`${id} security zone`} value={sub.zone || ''} onChange={event => changeSubinterface(id, 'zone', event.target.value)}/></td>}
+      <td className="subinterface-actions"><button type="button" className="remove" aria-label={`Remove ${id}`} title="Remove subinterface" onClick={() => removeSubinterface(id)}><X size={14}/></button></td>
+    </tr>{(sub.vlanId == null || duplicate) && <tr className="subinterface-warning-row"><td colSpan={isNgfw ? 6 : 5}>{sub.vlanId == null ? 'Encapsulation is required before tagged traffic can use this subinterface.' : `VLAN ${sub.vlanId} is already assigned on this physical interface.`}</td></tr>}</React.Fragment>;
+  };
+  return <InspectorSection title="VLAN subinterfaces" badge={entries.length} className="subinterface-editor">
+    <div className="subinterface-toolbar"><p className="subinterface-intro">Assign the parent port, VLAN encapsulation, gateway, and zone.</p><button type="button" onClick={addSubinterface}>Add subinterface</button></div>
     {!entries.length && <p>No VLAN subinterfaces configured.</p>}
-    {entries.map(([id, sub]) => {
-      const duplicate = sub.vlanId != null && entries.some(([otherId, other]) => otherId !== id && other.parent === sub.parent && other.vlanId === sub.vlanId);
-      return <div className={`subinterface-card ${sub.vlanId == null || duplicate ? 'incomplete' : ''}`} key={id}>
-        <div className="subinterface-title"><strong>{id}</strong><button type="button" aria-label={`Remove ${id}`} title="Remove subinterface" onClick={() => removeSubinterface(id)}><X size={13}/></button></div>
-        <label>Physical interface<select value={sub.parent} onChange={event => changeSubinterface(id, 'parent', event.target.value)}>{ports.map(port => <option value={port.id} key={port.id}>{port.label}</option>)}</select></label>
-        <label>{isNgfw ? '802.1Q encapsulation / VLAN ID' : '802.1Q VLAN ID'}<input type="number" min="1" max="4094" placeholder="Required" value={sub.vlanId ?? ''} onChange={event => changeSubinterface(id, 'vlanId', event.target.value)}/></label>
-        <label>Gateway address<div className="subinterface-address"><input placeholder="IP address" value={item.interfaces?.[id]?.address || ''} onChange={event => changeSubinterface(id, 'address', event.target.value)}/><span>/</span><input type="number" min="0" max="32" value={item.interfaces?.[id]?.prefix ?? 24} onChange={event => changeSubinterface(id, 'prefix', event.target.value)}/></div></label>
-        {isNgfw && <label>Security zone<input value={sub.zone || ''} onChange={event => changeSubinterface(id, 'zone', event.target.value)}/></label>}
-        {sub.vlanId == null && <small className="subinterface-warning">Encapsulation is required before tagged traffic can use this subinterface.</small>}
-        {duplicate && <small className="subinterface-warning">VLAN {sub.vlanId} is already assigned on this physical interface.</small>}
-      </div>;
-    })}
-  </section>;
+    <div className="subinterface-groups">{interfaceGroups.map(group => <details className="subinterface-interface-group" key={group.port.id}>
+      <summary><span><EthernetPort size={14}/><strong>{group.port.label}</strong></span><small>{group.entries.length} subinterface{group.entries.length === 1 ? '' : 's'}</small><ChevronDown size={15}/></summary>
+      <div className="subinterface-table-wrap"><table className="subinterface-table"><thead><tr><th>Subinterface</th><th>Parent</th><th>VLAN</th><th>Gateway</th>{isNgfw && <th>Zone</th>}<th>Actions</th></tr></thead><tbody>{group.entries.map(subinterfaceCard)}</tbody></table></div>
+    </details>)}</div>
+  </InspectorSection>;
 }
 
 function PlacedDevice({ item, selected, pingSource, broadcastSource, broadcastRecipient, ipConflicts, interactionMode, zoom, cancelToken, onPingTarget, onConnect, onContextMenu, onSelect, onMove, onDelete }) {
