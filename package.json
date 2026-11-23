@@ -7,6 +7,10 @@
     "dev": "node --watch-path=server.mjs --watch-path=src/server --watch-path=src/assignments --watch-path=src/activities/service.mjs --watch-path=src/activities/spec.js --watch-path=src/activities/evaluate.js --watch-path=src/activities/builtins.mjs server.mjs --dev",
     "build": "vite build",
     "test": "node --test",
+    "progress:export": "node scripts/skill-progress-transfer.mjs export",
+    "progress:import": "node scripts/skill-progress-transfer.mjs import",
+    "progress:restore": "node scripts/restore-student-progress.mjs",
+    "progress:cleanup": "node scripts/cleanup-student-progress-transfer.mjs",
     "prestart": "npm run build",
     "start": "node server.mjs"
   },
